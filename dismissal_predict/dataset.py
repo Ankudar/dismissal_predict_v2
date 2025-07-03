@@ -1,29 +1,39 @@
-from pathlib import Path
+from datetime import datetime
+import os
+import shutil
 
-from loguru import logger
-from tqdm import tqdm
-import typer
+from config import ad_login, ad_password, cadr_users_list_url
 
-from dismissal_predict.config import PROCESSED_DATA_DIR, RAW_DATA_DIR
-
-app = typer.Typer()
+DIR = "data/raw"
 
 
-@app.command()
-def main(
-    # ---- REPLACE DEFAULT PATHS AS APPROPRIATE ----
-    input_path: Path = RAW_DATA_DIR / "dataset.csv",
-    output_path: Path = PROCESSED_DATA_DIR / "dataset.csv",
-    # ----------------------------------------------
-):
-    # ---- REPLACE THIS WITH YOUR OWN CODE ----
-    logger.info("Processing dataset...")
-    for i in tqdm(range(10), total=10):
-        if i == 5:
-            logger.info("Something happened for iteration 5.")
-    logger.success("Processing dataset complete.")
-    # -----------------------------------------
+def is_valid_date(filename):
+    try:
+        datetime.strptime(filename, "%d.%m.%Y.xls")
+        return True
+    except ValueError:
+        return False
+
+
+def get_latest_file(directory):
+    latest_file = None
+    latest_date = None
+
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if is_valid_date(file):
+                file_date = datetime.strptime(file, "%d.%m.%Y.xls")
+                if latest_date is None or file_date > latest_date:
+                    latest_date = file_date
+                    latest_file = os.path.join(root, file)
+
+    return latest_file
 
 
 if __name__ == "__main__":
-    app()
+    latest_file = get_latest_file(cadr_users_list_url)
+    if latest_file:
+        destination_file = os.path.join(DIR, "last_users_from_cadr.xls")
+        shutil.copy(latest_file, destination_file)
+    else:
+        print("Файлы не найдены.")
