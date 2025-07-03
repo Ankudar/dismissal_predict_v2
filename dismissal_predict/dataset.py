@@ -4,7 +4,7 @@ import shutil
 
 from config import ad_login, ad_password, cadr_users_list_url
 
-DIR = "data/raw"
+DATA_RAW = "data/raw"
 
 
 def is_valid_date(filename):
@@ -33,7 +33,7 @@ def get_latest_file(directory):
 if __name__ == "__main__":
     latest_file = get_latest_file(cadr_users_list_url)
     if latest_file:
-        destination_file = os.path.join(DIR, "last_users_from_cadr.xls")
+        destination_file = os.path.join(DATA_RAW, "last_users_from_cadr.xls")
         shutil.copy(latest_file, destination_file)
     else:
         print("Файлы не найдены.")

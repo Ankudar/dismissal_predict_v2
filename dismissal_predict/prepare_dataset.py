@@ -1,8 +1,10 @@
 import os
+
 import pandas as pd
 
 INPUT_FILE_CADR = "data/raw/last_users_from_cadr.xls"
-OUTPUT_DIR = "data/interim"
+DATA_INTERIM = "data/interim"
+
 
 def process_dataset(input_file, output_dir):
     # Чтение файла Excel, указывая, что заголовки находятся в первой строке
@@ -41,8 +43,9 @@ def process_dataset(input_file, output_dir):
     processed_data.to_csv(output_file, index=False, encoding="utf-8")
     print("Файл успешно обработан и сохранен.")
 
+
 if __name__ == "__main__":
     # Создание папки, если она не существует
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(DATA_INTERIM, exist_ok=True)
 
-    process_dataset(INPUT_FILE_CADR, OUTPUT_DIR)
+    process_dataset(INPUT_FILE_CADR, DATA_INTERIM)
