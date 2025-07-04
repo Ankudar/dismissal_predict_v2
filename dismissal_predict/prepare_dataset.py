@@ -76,6 +76,7 @@ def process_main_users(input_file, output_dir):
 def transform_value(col_name, value):
     return WHISPER_CATEGORIES_WEIGHT[col_name].get(value, 0)
 
+
 def process_whisper_stat(input_file, output_dir):
     df = pd.read_csv(input_file, header=0)
 
@@ -163,8 +164,8 @@ def final_base_for_train_top():
 
 
 if __name__ == "__main__":
-    # process_last_users_from_cadr(INPUT_FILE_CADR, DATA_INTERIM)
-    # process_children(INPUT_FILE_CHILDREN, DATA_INTERIM)
-    # process_main_users(INPUT_FILE_MAIN_USERS, DATA_INTERIM)
+    process_last_users_from_cadr(INPUT_FILE_CADR, DATA_INTERIM)
+    process_children(INPUT_FILE_CHILDREN, DATA_INTERIM)
+    process_main_users(INPUT_FILE_MAIN_USERS, DATA_INTERIM)
     process_whisper_stat(INPUT_FILE_STAT, DATA_INTERIM)
-    # process_zup_path(INPUT_ZUP_PATH, DATA_INTERIM)
+    process_zup_path(INPUT_ZUP_PATH, DATA_INTERIM)

@@ -274,8 +274,8 @@ def get_1c_zup(base_name, server_1c, login, password):
 
 
 if __name__ == "__main__":
-    # get_latest_file(cadr_users_list_url)
-    # get_portal_users(portal_users_link)
-    # get_portal_children(portal_children_link)
+    get_latest_file(cadr_users_list_url)
+    get_portal_users(portal_users_link)
+    get_portal_children(portal_children_link)
     get_whisper_stat(whisper_data)
-    # get_1c_zup(Ref_zup, Srvr_zup, login_1c, password_1c)
+    get_1c_zup(Ref_zup, Srvr_zup, login_1c, password_1c)
