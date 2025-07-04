@@ -28,6 +28,7 @@ def merge_base(bases, index, merge_type):
 
 def convert_dates(df):
     target_format = "%d.%m.%Y %H:%M:%S"
+
     df["дата_рождения"] = df["дата_рождения"].apply(
         lambda x: (
             pd.to_datetime(x, format="%d.%m.%Y", errors="coerce").strftime(target_format)
