@@ -9,11 +9,42 @@ INPUT_FILE_CADR = "data/raw/last_users_from_cadr.xls"
 INPUT_FILE_CHILDREN = "data/raw/children.csv"
 INPUT_FILE_MAIN_USERS = "data/raw/main_users.csv"
 INPUT_FILE_STAT = "data/raw/whisper_stat.csv"
-DATA_INTERIM = "data/interim"
 INPUT_ZUP_PATH = "data/raw/zup"
+DATA_INTERIM = "data/interim"
+DATA_PROCESSED = "data/processed"
 
 CONFIG = Config(MAIN_CONFIGS)
 WHISPER_CATEGORIES_WEIGHT = CONFIG.WHISPER_CATEGORIES_WEIGHT
+
+
+def prepare_data(data):
+    data.columns = data.columns.str.lower()
+    data = data.apply(lambda x: x.str.lower() if x.dtype == "object" else x)
+    data = data.apply(process_spaces)
+    data.columns = [replace_spaces(col) for col in data.columns]
+    data = drop_duplicated(data)
+    return data
+
+
+def process_spaces(s):
+    if isinstance(s, str):
+        s = s.strip()
+        s = " ".join(s.split())
+    return s
+
+
+def replace_spaces(s):
+    if isinstance(s, str):
+        s = s.strip()
+        s = "_".join(s.split())
+    return s
+
+
+def drop_duplicated(data):
+    num_duplicates = data.duplicated().sum()
+    if num_duplicates > 0:
+        data = data.drop_duplicates(keep="first").reset_index(drop=True)
+    return data
 
 
 def process_last_users_from_cadr(input_file, output_dir):
@@ -35,6 +66,8 @@ def process_last_users_from_cadr(input_file, output_dir):
         return
 
     processed_data = df[columns_to_copy]
+    processed_data = prepare_data(processed_data)
+    processed_data.rename(columns={"ф.и.о.": "фио"}, inplace=True)
 
     output_file = os.path.join(output_dir, "check_last_users_update.csv")
     processed_data.to_csv(output_file, index=False, encoding="utf-8")
@@ -51,6 +84,7 @@ def process_children(input_file, output_dir):
         return
 
     processed_data = df[columns_to_copy]
+    processed_data = prepare_data(processed_data)
 
     output_file = os.path.join(output_dir, "children.csv")
     processed_data.to_csv(output_file, index=False, encoding="utf-8")
@@ -59,7 +93,15 @@ def process_children(input_file, output_dir):
 
 def process_main_users(input_file, output_dir):
     df = pd.read_csv(input_file, header=1)
-    columns_to_copy = ["Дата увольнения", "Логин", "Должность", "Имя", "Фамилия"]
+    columns_to_copy = [
+        "Дата увольнения",
+        "Логин",
+        "Должность",
+        "Имя",
+        "Фамилия",
+        "ID",
+        "Дата рождения",
+    ]
 
     df.columns = df.columns.str.strip()
     missing_columns = [col for col in columns_to_copy if col not in df.columns]
@@ -67,6 +109,7 @@ def process_main_users(input_file, output_dir):
         return
 
     processed_data = df[columns_to_copy]
+    processed_data = prepare_data(processed_data)
 
     output_file = os.path.join(output_dir, "main_users.csv")
     processed_data.to_csv(output_file, index=False, encoding="utf-8")
@@ -84,8 +127,7 @@ def process_whisper_stat(input_file, output_dir):
         if col != "логин":
             df[col] = df[col].apply(lambda x: transform_value(col, x))
 
-    # Группируем по "логин" и вычисляем среднее
-    df = df.groupby("логин").mean().reset_index()  # Сброс индекса
+    df = df.groupby("логин").mean().reset_index()
 
     output_file = os.path.join(output_dir, "whisper_stat.csv")
     df.to_csv(output_file, index=False, encoding="utf-8")
@@ -130,29 +172,27 @@ def process_zup_path(input_dir, output_dir):
     sorted_columns = ["Месяц"] + date_columns
     merged_data = merged_data[sorted_columns]
 
-    # Создаем новый DataFrame с ФИО и средним значением
     result_data = pd.DataFrame()
     result_data["ФИО"] = merged_data["Месяц"]
     result_data["ср_зп"] = round(merged_data.iloc[:, 1:].mean(axis=1), 2)
 
-    # Фильтрация ФИО
     unique_fios = result_data["ФИО"].unique()
     pattern = re.compile(r"^[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+")
     filtered_fios = [fio for fio in unique_fios if pattern.match(fio)]
-    result_data_filtered = result_data[result_data["ФИО"].isin(filtered_fios)]
-    result_data_filtered = result_data_filtered.reset_index(drop=True)
+    processed_data = result_data[result_data["ФИО"].isin(filtered_fios)]
+    processed_data = processed_data.reset_index(drop=True)
 
-    # Градация значений
     num_categories = 5
-    result_data_filtered["уровень_зп"] = pd.qcut(
-        result_data_filtered["ср_зп"],
+    processed_data["уровень_зп"] = pd.qcut(
+        processed_data["ср_зп"],
         q=num_categories,
         labels=["низкий", "ниже среднего", "средний", "выше среднего", "высокий"],
     )
 
-    # Сохраняем итоговые данные в CSV
-    result_file = os.path.join(output_dir, "zup.csv")
-    result_data_filtered.to_csv(result_file, index=False)
+    processed_data = prepare_data(processed_data)
+    output_file = os.path.join(output_dir, "zup.csv")
+    processed_data.to_csv(output_file, index=False)
+    print(f"Файл {output_file} успешно обработан и сохранен.")
 
 
 def final_base_for_train_all():
