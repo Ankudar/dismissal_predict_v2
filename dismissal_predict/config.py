@@ -5,6 +5,26 @@ MAIN_CONFIGS = Path("D:/python/VSCode/main_config.json")
 
 
 class Config:
+    WHISPER_CATEGORIES = {
+        "Увольнение": {"нет": 0, "да": 1},
+        "Оффер": {"нет": 0, "да": 1},
+        "Вредительство": {"нет": 0, "да": 1},
+        "Конфликты": {"нет": 0, "да": 1},
+        "Стресс": {"нет": 0, "да": 1},
+        "Личная жизнь": {"нет": 0, "да": 1},
+        "Тон": {"дружественный": 0, "негативный": 1},
+    }
+
+    WHISPER_CATEGORIES_WEIGHT = {
+        "увольнение": {0: 0, 1: 70},
+        "оффер": {0: 0, 1: 60},
+        "вредительство": {0: 0, 1: 50},
+        "конфликты": {0: 0, 1: 40},
+        "стресс": {0: 0, 1: 30},
+        "личная жизнь": {0: 0, 1: 20},
+        "тон": {0: 0, 1: 10},
+    }
+
     def __init__(self, config_path):
         with open(config_path, "r", encoding="utf-8") as file:
             self.config = json.load(file)
@@ -31,19 +51,17 @@ class Config:
         url = self.config["links"]["portal_users_link"]
         return url
 
+    def get_whisper_url(self):
+        url = self.config["links"]["whisper_data"]
+        return url
+
     def get_1c_info(self):
-        login_1c = self.config["1c_info"]["login"]
-        password_1c = self.config["1c_info"]["password"]
-        Srvr_zup = self.config["1c_info"]["Srvr"]
-        Ref_zup = self.config["1c_info"]["Ref"]
-        return login_1c, password_1c, Srvr_zup, Ref_zup
+        login = self.config["1c_info"]["login"]
+        password = self.config["1c_info"]["password"]
+        server = self.config["1c_info"]["Srvr"]
+        base = self.config["1c_info"]["Ref"]
+        return login, password, server, base
 
 
 if __name__ == "__main__":
-    config = Config(MAIN_CONFIGS)
-    ad_login, ad_password = config.get_ad_credentials()
-    portal_login, portal_password = config.get_portal_credentials()
-    cadr_users_list_url = config.get_cadr_users_list()
-    portal_children_link = config.get_portal_children_link()
-    portal_users_link = config.get_portal_users_link()
-    login_1c, password_1c, Srvr_zup, Ref_zup = config.get_1c_info()
+    pass

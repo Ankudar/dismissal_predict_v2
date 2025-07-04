@@ -2,13 +2,18 @@ import glob
 import os
 import re
 
+from config import MAIN_CONFIGS, Config
 import pandas as pd
 
 INPUT_FILE_CADR = "data/raw/last_users_from_cadr.xls"
 INPUT_FILE_CHILDREN = "data/raw/children.csv"
 INPUT_FILE_MAIN_USERS = "data/raw/main_users.csv"
+INPUT_FILE_STAT = "data/raw/whisper_stat.csv"
 DATA_INTERIM = "data/interim"
 INPUT_ZUP_PATH = "data/raw/zup"
+
+CONFIG = Config(MAIN_CONFIGS)
+WHISPER_CATEGORIES_WEIGHT = CONFIG.WHISPER_CATEGORIES_WEIGHT
 
 
 def process_last_users_from_cadr(input_file, output_dir):
@@ -65,6 +70,24 @@ def process_main_users(input_file, output_dir):
 
     output_file = os.path.join(output_dir, "main_users.csv")
     processed_data.to_csv(output_file, index=False, encoding="utf-8")
+    print(f"Файл {input_file} успешно обработан и сохранен.")
+
+
+def transform_value(col_name, value):
+    return WHISPER_CATEGORIES_WEIGHT[col_name].get(value, 0)
+
+def process_whisper_stat(input_file, output_dir):
+    df = pd.read_csv(input_file, header=0)
+
+    for col in df.columns:
+        if col != "логин":
+            df[col] = df[col].apply(lambda x: transform_value(col, x))
+
+    # Группируем по "логин" и вычисляем среднее
+    df = df.groupby("логин").mean().reset_index()  # Сброс индекса
+
+    output_file = os.path.join(output_dir, "whisper_stat.csv")
+    df.to_csv(output_file, index=False, encoding="utf-8")
     print(f"Файл {input_file} успешно обработан и сохранен.")
 
 
@@ -131,8 +154,17 @@ def process_zup_path(input_dir, output_dir):
     result_data_filtered.to_csv(result_file, index=False)
 
 
+def final_base_for_train_all():
+    pass
+
+
+def final_base_for_train_top():
+    pass
+
+
 if __name__ == "__main__":
-    process_last_users_from_cadr(INPUT_FILE_CADR, DATA_INTERIM)
-    process_children(INPUT_FILE_CHILDREN, DATA_INTERIM)
-    process_main_users(INPUT_FILE_MAIN_USERS, DATA_INTERIM)
-    process_zup_path(INPUT_ZUP_PATH, DATA_INTERIM)
+    # process_last_users_from_cadr(INPUT_FILE_CADR, DATA_INTERIM)
+    # process_children(INPUT_FILE_CHILDREN, DATA_INTERIM)
+    # process_main_users(INPUT_FILE_MAIN_USERS, DATA_INTERIM)
+    process_whisper_stat(INPUT_FILE_STAT, DATA_INTERIM)
+    # process_zup_path(INPUT_ZUP_PATH, DATA_INTERIM)
