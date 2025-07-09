@@ -2,6 +2,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 DATA_INTERIM = "data/interim"
 DATA_PROCESSED = "data/processed"
@@ -63,6 +64,65 @@ def mode_with_tie(series):
     if "m/f" in modes:
         modes = ["m/f" if mode == "f/m" else mode for mode in modes]
     return "/".join(set(modes))
+
+
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+
+
+def clean_encode_scale(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # Отделяем таргет
+    target_col = "уволен"
+    if target_col in df.columns:
+        target = df[[target_col]]
+        df = df.drop(columns=[target_col])
+    else:
+        target = None
+
+    # Удаляем ненужные столбцы
+    drop_cols = [
+        "id",
+        "логин",
+        "имя",
+        "фамилия",
+        "фио",
+        "должность",
+        "дата_увольнения",
+        "дата_рождения",
+        "дата_приема_в_1с",
+        "текущая_должность_на_портале",
+        "отдел",
+        "уровень_зп",
+    ]
+    df.drop(columns=[col for col in drop_cols if col in df.columns], inplace=True)
+
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].fillna("unknown")
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].fillna(df[col].median())
+
+    # Преобразование категориальных признаков
+    for col in df.select_dtypes(include=["object"]).columns:
+        le = LabelEncoder()
+        df[col] = le.fit_transform(df[col].astype(str))
+
+    # Удаляем datetime-признаки, если остались
+    df = df.drop(columns=df.select_dtypes(include=["datetime"]).columns)
+
+    # Масштабирование числовых признаков
+    numeric_cols = df.select_dtypes(include=["number"]).columns
+    if not df[numeric_cols].empty:
+        scaler = StandardScaler()
+        df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
+
+    # Возвращаем таргет
+    if target is not None:
+        df[target_col] = target.values
+
+    return df
 
 
 def main_prepare_for_all(main_users, users_salary, users_cadr, children):
@@ -138,6 +198,9 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
     main_users["отдел_num"] = main_users["отдел"].map(position_to_num)
     main_users.to_csv(f"{DATA_PROCESSED}/main_all.csv", index=False)
 
+    main_users_for_train = clean_encode_scale(main_users)
+    main_users_for_train.to_csv(f"{DATA_PROCESSED}/main_users_for_train.csv", index=False)
+
 
 def prepare_with_mic():
     main_all = pd.read_csv(f"{DATA_PROCESSED}/main_all.csv", delimiter=",", decimal=",")
@@ -153,6 +216,9 @@ def prepare_with_mic():
     ]
     main_top = main_top[~main_top["логин"].isin(logins_to_remove)]
     main_top.to_csv(f"{DATA_PROCESSED}/main_top.csv", index=False)
+
+    main_top_for_train = clean_encode_scale(main_top)
+    main_top_for_train.to_csv(f"{DATA_PROCESSED}/main_top_for_train.csv", index=False)
     pass
 
 
