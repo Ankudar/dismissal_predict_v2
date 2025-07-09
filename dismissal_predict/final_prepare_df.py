@@ -114,6 +114,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users[col] = main_users[col].astype(str)
     main_users["ср_зп"] = main_users["ср_зп"].astype(float)
     main_users["уволен"] = main_users["дата_увольнения"].notna().astype(int)
+
     main_users["возраст"] = np.where(
         main_users["дата_рождения"].notna(),
         (today - main_users["дата_рождения"]).dt.days // 365,
