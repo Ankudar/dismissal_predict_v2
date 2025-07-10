@@ -133,7 +133,7 @@ def add_predictions_to_excel(data, model, result_file, threshold):
         else:
             new_row = row.to_dict()
             new_row[current_date] = probabilities[index]
-            existing_results = existing_results.append(new_row, ignore_index=True)
+            existing_results = existing_results._append(new_row, ignore_index=True)
 
     # Запись результатов в Excel
     existing_results.to_excel(result_file, index=False)
@@ -177,24 +177,22 @@ def print_confusion_matrix(data, model):
 
     # Матрица ошибок
     cm = confusion_matrix(actual, predictions)
-    print("Confusion Matrix with best threshold:")
-    print(cm)
+    # print("Confusion Matrix with best threshold:")
+    # print(cm)
 
     # Отчет о классификации
     report = classification_report(actual, predictions)
-    print("\nClassification Report:")
-    print(report)
+    # print("\nClassification Report:")
+    # print(report)
 
-    print(f"\nBest threshold: {best_threshold}")
+    # print(f"\nBest threshold: {best_threshold}")
 
     return best_threshold
 
 
 if __name__ == "__main__":
-    print("Confusion Matrix and Classification Report for main_top:")
     best_threshold_top = print_confusion_matrix(main_top, model_top_users)
     add_predictions_to_excel(main_top, model_top_users, RESULT_FILE_TOP, best_threshold_top)
 
-    print("\nConfusion Matrix and Classification Report for main_all:")
     best_threshold_all = print_confusion_matrix(main_all, model_main_users)
     add_predictions_to_excel(main_all, model_main_users, RESULT_FILE_ALL, best_threshold_all)
