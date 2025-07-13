@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+import getpass
 import os
 import shutil
 from threading import Lock
@@ -14,8 +15,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from tqdm import tqdm
 
-DATA_RAW = "~/data/raw"
-CHROMEDRIVER_PATH = "/home/root6/python/CHROMEDRIVER/chromedriver"
+DATA_RAW = "/home/root6/python/dismissal_predict_v2/data/raw"
+CHROMEDRIVER_PATH = "/home/root6/chromedriver/chromedriver"
 CONFIG = Config(MAIN_CONFIGS)
 lock = Lock()
 
@@ -37,6 +38,7 @@ def is_valid_date(filename):
 
 
 def get_latest_file(directory):
+    print("Загрузка кадровых файлов")
     latest_file = None
     latest_date = None
 
@@ -53,6 +55,7 @@ def get_latest_file(directory):
         shutil.copy(latest_file, destination_file)
     else:
         print("Файлы не найдены.")
+    print("Загрузка кадровых файлов завершена")
 
 
 def login(driver, username, password):
@@ -83,6 +86,7 @@ def get_driver():
 
 
 def get_portal_users(auth_url):
+    print("Загрузка пользователей с портала")
     # auth_url = "http://next.portal.local/bitrix/admin/user_admin.php?lang=ru#authorize"
     driver = None
     try:
@@ -124,9 +128,11 @@ def get_portal_users(auth_url):
     finally:
         if driver:
             driver.quit()
+    print("Загрузка пользователей с портала завершена")
 
 
 def get_portal_children(auth_url):
+    print("Загрузка детей пользователей с портала")
     driver = None
     try:
         driver = get_driver()
@@ -152,6 +158,7 @@ def get_portal_children(auth_url):
     finally:
         if driver:
             driver.quit()
+    print("Загрузка детей пользователей с портала завершена")
 
 
 def get_whisper_stat(
@@ -159,6 +166,7 @@ def get_whisper_stat(
     check_list_file=f"{DATA_RAW}/check_list.txt",
     output_file=f"{DATA_RAW}/whisper_stat.csv",
 ):
+    print("Загрузка статистики топов")
     if not os.path.exists(check_list_file):
         with open(check_list_file, "w", encoding="utf-8") as f:
             f.write("")
@@ -200,6 +208,7 @@ def get_whisper_stat(
     print(f"Всего {len(all_files)} файлов.")
     print(f"Было обработано ранее {len(check_list)} файлов.")
     print(f"Было обработано сейчас {len(files_to_process)} файлов.")
+    print("Загрузка статистики топов завершена")
 
 
 def process_file(file, check_list_file, output_file, files_to_process):
@@ -271,7 +280,8 @@ def process_file(file, check_list_file, output_file, files_to_process):
 
 
 def get_1c_zup(base_name, server_1c, login, password):
-    print("Типа выгрузил")
+    print("Загрузка ЗУП")
+    print("Загрузка ЗУП завершена")
 
 
 if __name__ == "__main__":
