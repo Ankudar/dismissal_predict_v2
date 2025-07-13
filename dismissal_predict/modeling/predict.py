@@ -28,8 +28,13 @@ RESULT_FILE_TOP = f"{RESULTS}/result_top.xlsx"
 main_all = pd.read_csv(INPUT_FILE_MAIN_ALL, delimiter=",", decimal=",")
 main_top = pd.read_csv(INPUT_FILE_MAIN_TOP, delimiter=",", decimal=",")
 
-model_main_users = joblib.load(MODEL_MAIN_USERS)
-model_top_users = joblib.load(MODEL_TOP_USERS)
+loaded_main = joblib.load(MODEL_MAIN_USERS)
+model_main_users = loaded_main["model"]
+threshold_main = loaded_main["threshold"]
+
+loaded_top = joblib.load(MODEL_TOP_USERS)
+model_top_users = loaded_top["model"]
+threshold_top = loaded_top["threshold"]
 
 
 def clean_encode_scale(df: pd.DataFrame) -> pd.DataFrame:
@@ -151,7 +156,7 @@ def add_predictions_to_excel(data, model, result_file, threshold):
         raise
 
 
-def find_best_threshold(y_true, y_probs):
+def find_best_threshold(y_true, y_probs, cost_fp=5, cost_fn=5):
     try:
         thresholds = np.arange(1.0, 0.0, -0.001)
         costs = []
@@ -162,7 +167,8 @@ def find_best_threshold(y_true, y_probs):
             tn, fp, fn, tp = cm.ravel()
 
             # Определяем "стоимость" на основе ваших требований
-            cost = (1 * tn) - (1 * fp) - (1 * fn) + (1 * tp)
+            # cost = (1 * tn) - (1 * fp) - (1 * fn) + (1 * tp)
+            cost = (1 * tn) - (cost_fp * fp) - (cost_fn * fn) + (1 * tp)
             costs.append(cost)
 
         # Находим порог, при котором "стоимость" максимальна
@@ -194,15 +200,15 @@ def print_confusion_matrix(data, model):
 
         # Матрица ошибок
         cm = confusion_matrix(actual, predictions)
-        # print("Confusion Matrix with best threshold:")
-        # print(cm)
+        print("Confusion Matrix with best threshold:")
+        print(cm)
 
         # Отчет о классификации
         report = classification_report(actual, predictions)
-        # print("\nClassification Report:")
-        # print(report)
+        print("\nClassification Report:")
+        print(report)
 
-        # print(f"\nBest threshold: {best_threshold}")
+        print(f"\nBest threshold: {best_threshold}")
 
         return best_threshold
     except Exception as e:
@@ -211,8 +217,6 @@ def print_confusion_matrix(data, model):
 
 
 if __name__ == "__main__":
-    best_threshold_top = print_confusion_matrix(main_top, model_top_users)
-    add_predictions_to_excel(main_top, model_top_users, RESULT_FILE_TOP, best_threshold_top)
+    add_predictions_to_excel(main_top, model_top_users, RESULT_FILE_TOP, threshold_top)
 
-    best_threshold_all = print_confusion_matrix(main_all, model_main_users)
-    add_predictions_to_excel(main_all, model_main_users, RESULT_FILE_ALL, best_threshold_all)
+    add_predictions_to_excel(main_all, model_main_users, RESULT_FILE_ALL, threshold_main)
