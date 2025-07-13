@@ -221,31 +221,30 @@ def run_optuna_experiment(
 
         # Проверка на существование сохранённой модели
         if os.path.exists(model_output_path):
-            loaded = joblib.load(model_output_path)
-            existing_model = loaded["model"]
-            existing_thresh = find_best_threshold(
-                y_test, existing_model.predict_proba(X_test)[:, 1], cost_fp, cost_fn
-            )
-            existing_proba = existing_model.predict_proba(X_test)[:, 1]
-            existing_pred = (existing_proba >= existing_thresh).astype(int)
+            try:
+                loaded = joblib.load(model_output_path)
+                existing_model = loaded["model"]
+                existing_features = loaded["features"]
 
-            existing_metrics = {
-                "accuracy": accuracy_score(y_test, existing_pred),
-                "precision": precision_score(y_test, existing_pred),
-                "recall": recall_score(y_test, existing_pred),
-                "roc_auc": roc_auc_score(y_test, existing_proba),
-                "f1": f1_score(y_test, existing_pred),
-            }
+                # Приводим X_test к нужному виду (по признакам старой модели)
+                X_test_existing = X_test[existing_features]
+                existing_proba = existing_model.predict_proba(X_test_existing)[:, 1]
+                existing_thresh = find_best_threshold(y_test, existing_proba, cost_fp, cost_fn)
+                existing_pred = (existing_proba >= existing_thresh).astype(int)
 
-            # Сравнение по кастомному score
+                # Кастомный скор для старой модели
+                if confusion_matrix(y_test, existing_pred).shape == (2, 2):
+                    etn, efp, efn, etp = confusion_matrix(y_test, existing_pred).ravel()
+                    existing_score = etp + etn - cost_fp * efp - cost_fn * efn
+                else:
+                    existing_score = -np.inf
+            except Exception as e:
+                logger.warning(f"Не удалось вычислить метрику для существующей модели: {e}")
+                existing_score = -np.inf
+
+            # Кастомный скор для новой модели
             tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
             final_score = tp + tn - cost_fp * fp - cost_fn * fn
-
-            if confusion_matrix(y_test, existing_pred).shape == (2, 2):
-                etn, efp, efn, etp = confusion_matrix(y_test, existing_pred).ravel()
-                existing_score = etp + etn - cost_fp * efp - cost_fn * efn
-            else:
-                existing_score = -np.inf
 
             if final_score > existing_score:
                 logger.info("Новая модель лучше сохраненной по кастомной метрике, сохраняем.")
@@ -261,6 +260,7 @@ def run_optuna_experiment(
                 logger.info(
                     "Сохраненная модель лучше по кастомной метрике, оставляем без изменений."
                 )
+
         else:
             logger.info("Сохраняем модель, т.к. других еще не было.")
             joblib.dump(
@@ -287,7 +287,7 @@ def run_optuna_experiment(
             mlflow.log_metrics(
                 {**final_metrics, f"optimized_metric_value": float(final_metric_value)}
             )
-            mlflow.sklearn.log_model(final_model, name="final_model", input_example=input_example)
+            mlflow.sklearn.log_model(final_model, name="final_model", input_example=input_example)  # type: ignore
 
             # 1. Confusion matrix
             fig_cm, ax_cm = plt.subplots()

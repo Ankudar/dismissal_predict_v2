@@ -95,7 +95,7 @@ def add_predictions_to_excel(original_df, model, threshold, result_file, preproc
                     "предсказание_увольнения": row["предсказание_увольнения"],
                     today: row[today],
                 }
-                final_df = final_df._append(new_row, ignore_index=True)
+                final_df = final_df._append(new_row, ignore_index=True)  # type: ignore
 
         final_df.to_excel(result_file, index=False)
         logger.info(f"Результаты предсказаний успешно записаны в {result_file}")

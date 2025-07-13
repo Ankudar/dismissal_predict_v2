@@ -112,10 +112,10 @@ class DataPreprocessor:
             df[col] = df[col].fillna(df[col].median())
 
         # Преобразуем категориальные признаки
-        df[self.cat_cols] = self.ordinal_encoder.transform(df[self.cat_cols])
+        df[self.cat_cols] = self.ordinal_encoder.transform(df[self.cat_cols])  # type: ignore
 
         # Масштабируем числовые признаки
-        df[self.numeric_cols] = self.scaler.transform(df[self.numeric_cols])
+        df[self.numeric_cols] = self.scaler.transform(df[self.numeric_cols])  # type: ignore
 
         # Удаляем NaN, если остались
         if df.isnull().any().any():
@@ -157,21 +157,27 @@ def convert_dates(df):
         raise
 
 
-# def mode_with_tie(series):
-#     try:
-#         if series.empty:
-#             return "none"
+def mode_with_tie(series):
+    try:
+        if series.empty:
+            return "none"
 
-#         counts = series.value_counts()
-#         max_count = counts.max()
-#         modes = counts[counts == max_count].index.tolist()
+        counts = series.value_counts()
+        max_count = counts.max()
+        modes = counts[counts == max_count].index.tolist()
 
-#         if "m/f" in modes:
-#             modes = ["m/f" if mode == "f/m" else mode for mode in modes]
-#         return "/".join(set(modes))
-#     except Exception as e:
-#         logger.info(f"Ошибка: {e}")
-#         raise
+        # Приводим f/m и m/f к одному виду
+        normalized_modes = set()
+        for mode in modes:
+            if mode in ["f/m", "m/f"]:
+                normalized_modes.add("m/f")
+            else:
+                normalized_modes.add(mode)
+
+        return "/".join(sorted(normalized_modes))
+    except Exception as e:
+        logger.info(f"Ошибка в mode_with_tie: {e}")
+        raise
 
 
 def main_prepare_for_all(main_users, users_salary, users_cadr, children):
@@ -191,7 +197,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
                 avg_child_age=("age", "mean"),
                 main_child_gender=(
                     "gender",
-                    lambda x: x.mode()[0] if not x.mode().empty else np.nan,
+                    mode_with_tie,
                 ),
             )
             .reset_index()
@@ -227,13 +233,13 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
 
         main_users["возраст"] = np.where(
             main_users["дата_рождения"].notna(),
-            (today - main_users["дата_рождения"]).dt.days // 365,
+            (today - main_users["дата_рождения"]).dt.days // 365,  # type: ignore
             np.nan,
         )
         main_users["стаж"] = np.where(
             main_users["дата_увольнения"].notna(),
             (main_users["дата_увольнения"] - main_users["дата_приема_в_1с"]).dt.days / 365,
-            (today - main_users["дата_приема_в_1с"]).dt.days / 365,
+            (today - main_users["дата_приема_в_1с"]).dt.days / 365,  # type: ignore
         )
         main_users["стаж"] = np.maximum(main_users["стаж"], 0)
 
