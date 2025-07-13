@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-MAIN_CONFIGS = Path("D:/python/VSCode/main_config.json")
+MAIN_CONFIGS = "/home/root6/python/main_config.json"
 
 
 class Config:

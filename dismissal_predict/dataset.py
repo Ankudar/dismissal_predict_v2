@@ -14,7 +14,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from tqdm import tqdm
 
-DATA_RAW = "data/raw"
+DATA_RAW = "~/data/raw"
+CHROMEDRIVER_PATH = "/home/root6/python/CHROMEDRIVER/chromedriver"
 CONFIG = Config(MAIN_CONFIGS)
 lock = Lock()
 
@@ -69,7 +70,7 @@ def login(driver, username, password):
 
 
 def get_driver():
-    driver_service = Service(executable_path="D:\\python\\CHROMEDRIVER\\chromedriver.exe")
+    driver_service = Service(executable_path=CHROMEDRIVER_PATH)
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")

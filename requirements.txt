@@ -1,4 +1,11 @@
-loguru==0.7.3
-pytest==8.4.1
-tqdm==4.66.5
-typer==0.16.0
+loguru
+pytest
+tqdm
+typer
+selenium
+pandas
+scikit-learn
+optuna
+mlflow
+xgboost
+joblib
