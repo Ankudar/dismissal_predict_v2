@@ -17,8 +17,8 @@ from sklearn.model_selection import cross_val_score, train_test_split
 from xgboost import XGBClassifier
 
 # Пути
-DATA_PROCESSED = "data/processed"
-MODELS = "models"
+DATA_PROCESSED = "/home/root6/python/dismissal_predict_v2/data/processed"
+MODELS = "/home/root6/python/dismissal_predict_v2/models"
 os.makedirs(MODELS, exist_ok=True)
 
 INPUT_FILE_MAIN_USERS = f"{DATA_PROCESSED}/main_users_for_train.csv"
