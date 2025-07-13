@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import getpass
+import logging
 import os
 import shutil
 from threading import Lock
@@ -14,6 +15,9 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from tqdm import tqdm
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 DATA_RAW = "/home/root6/python/dismissal_predict_v2/data/raw"
 CHROMEDRIVER_PATH = "/home/root6/chromedriver/chromedriver"
@@ -38,7 +42,7 @@ def is_valid_date(filename):
 
 
 def get_latest_file(directory):
-    print("Загрузка кадровых файлов")
+    logger.info("Загрузка кадровых файлов")
     latest_file = None
     latest_date = None
 
@@ -54,8 +58,8 @@ def get_latest_file(directory):
         destination_file = os.path.join(DATA_RAW, "last_users_from_cadr.xls")
         shutil.copy(latest_file, destination_file)
     else:
-        print("Файлы не найдены.")
-    print("Загрузка кадровых файлов завершена")
+        logger.info("Файлы не найдены.")
+    logger.info("Загрузка кадровых файлов завершена")
 
 
 def login(driver, username, password):
@@ -86,7 +90,7 @@ def get_driver():
 
 
 def get_portal_users(auth_url):
-    print("Загрузка пользователей с портала")
+    logger.info("Загрузка пользователей с портала")
     # auth_url = "http://next.portal.local/bitrix/admin/user_admin.php?lang=ru#authorize"
     driver = None
     try:
@@ -102,7 +106,7 @@ def get_portal_users(auth_url):
         files = [f for f in files if f.endswith(".xls") or f.endswith(".xlsx")]
 
         if not files:
-            print("Нет загруженных файлов.")
+            logger.info("Нет загруженных файлов.")
             return
 
         latest_file = max([os.path.join(downloads_path, f) for f in files], key=os.path.getctime)
@@ -116,23 +120,26 @@ def get_portal_users(auth_url):
             new_file_path = os.path.join(DATA_RAW, "main_users.csv")
             df.to_csv(new_file_path, index=False)
 
-            print(f"Файл {latest_file} скопирован в {DATA_RAW} и пересохранен как main_users.csv.")
+            logger.info(
+                f"Файл {latest_file} скопирован в {DATA_RAW} и пересохранен как main_users.csv."
+            )
         else:
-            print("Не удалось найти таблицы в HTML-файле.")
+            logger.info("Не удалось найти таблицы в HTML-файле.")
 
         os.remove(latest_file)
         os.remove(temp_file_path)
 
     except Exception as e:
-        print(f"Ошибка: {e}")
+        logger.info(f"Ошибка: {e}")
+        raise
     finally:
         if driver:
             driver.quit()
-    print("Загрузка пользователей с портала завершена")
+    logger.info("Загрузка пользователей с портала завершена")
 
 
 def get_portal_children(auth_url):
-    print("Загрузка детей пользователей с портала")
+    logger.info("Загрузка детей пользователей с портала")
     driver = None
     try:
         driver = get_driver()
@@ -151,14 +158,15 @@ def get_portal_children(auth_url):
 
         df = pd.DataFrame(data)
         df.to_csv(os.path.join(DATA_RAW, "children.csv"), index=False, header=False, sep=",")
-        print(f"Данные сохранены в {DATA_RAW}/children.csv.")
+        logger.info(f"Данные сохранены в {DATA_RAW}/children.csv.")
 
     except Exception as e:
-        print(f"Ошибка: {e}")
+        logger.info(f"Ошибка: {e}")
+        raise
     finally:
         if driver:
             driver.quit()
-    print("Загрузка детей пользователей с портала завершена")
+    logger.info("Загрузка детей пользователей с портала завершена")
 
 
 def get_whisper_stat(
@@ -166,7 +174,7 @@ def get_whisper_stat(
     check_list_file=f"{DATA_RAW}/check_list.txt",
     output_file=f"{DATA_RAW}/whisper_stat.csv",
 ):
-    print("Загрузка статистики топов")
+    logger.info("Загрузка статистики топов")
     if not os.path.exists(check_list_file):
         with open(check_list_file, "w", encoding="utf-8") as f:
             f.write("")
@@ -202,13 +210,14 @@ def get_whisper_stat(
             try:
                 future.result()
             except Exception as e:
-                print(f"Error processing file {file}: {e}")
-                print(traceback.format_exc())
+                logger.info(f"Error processing file {file}: {e}")
+                logger.info(traceback.format_exc())
+                raise
 
-    print(f"Всего {len(all_files)} файлов.")
-    print(f"Было обработано ранее {len(check_list)} файлов.")
-    print(f"Было обработано сейчас {len(files_to_process)} файлов.")
-    print("Загрузка статистики топов завершена")
+    logger.info(f"Всего {len(all_files)} файлов.")
+    logger.info(f"Было обработано ранее {len(check_list)} файлов.")
+    logger.info(f"Было обработано сейчас {len(files_to_process)} файлов.")
+    logger.info("Загрузка статистики топов завершена")
 
 
 def process_file(file, check_list_file, output_file, files_to_process):
@@ -275,18 +284,23 @@ def process_file(file, check_list_file, output_file, files_to_process):
 
             df.to_csv(output_file, encoding="utf-8", index=False)
     except Exception as e:
-        print(f"Error processing file {file}: {e}")
-        print(traceback.format_exc())
+        logger.info(f"Error processing file {file}: {e}")
+        logger.info(traceback.format_exc())
+        raise
 
 
 def get_1c_zup(base_name, server_1c, login, password):
-    print("Загрузка ЗУП")
-    print("Загрузка ЗУП завершена")
+    logger.info("Загрузка ЗУП")
+    logger.info("Загрузка ЗУП завершена")
 
 
-if __name__ == "__main__":
+def run_all():
     get_latest_file(cadr_users_list_url)
     get_portal_users(portal_users_link)
     get_portal_children(portal_children_link)
     get_whisper_stat(whisper_data)
     get_1c_zup(Ref_zup, Srvr_zup, login_1c, password_1c)
+
+
+if __name__ == "__main__":
+    run_all()
