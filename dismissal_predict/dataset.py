@@ -290,8 +290,12 @@ def process_file(file, check_list_file, output_file, files_to_process):
 
 
 def get_1c_zup(base_name, server_1c, login, password):
-    logger.info("Загрузка ЗУП")
-    logger.info("Загрузка ЗУП завершена")
+    try:
+        logger.info("Загрузка ЗУП")
+        logger.info("Загрузка ЗУП завершена")
+    except Exception as e:
+        logger.info(f"Ошибка: {e}")
+        raise
 
 
 def run_all():
