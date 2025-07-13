@@ -1,4 +1,5 @@
 from datetime import datetime
+import logging
 import os
 
 import joblib
@@ -7,9 +8,12 @@ import pandas as pd
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
-DATA_PROCESSED = "data/processed"
-MODELS = "models"
-RESULTS = "data/results"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+DATA_PROCESSED = "/home/root6/python/dismissal_predict_v2/data/processed"
+MODELS = "/home/root6/python/dismissal_predict_v2/models"
+RESULTS = "/home/root6/python/dismissal_predict_v2/data/results"
 os.makedirs(RESULTS, exist_ok=True)
 
 INPUT_FILE_MAIN_ALL = f"{DATA_PROCESSED}/main_all.csv"
@@ -29,165 +33,181 @@ model_top_users = joblib.load(MODEL_TOP_USERS)
 
 
 def clean_encode_scale(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+    try:
+        df = df.copy()
 
-    # Отделяем таргет
-    target_col = "уволен"
-    if target_col in df.columns:
-        target = df[[target_col]].values.flatten()
-        df = df.drop(columns=[target_col])
-    else:
-        target = None
+        # Отделяем таргет
+        target_col = "уволен"
+        if target_col in df.columns:
+            target = df[[target_col]].values.flatten()
+            df = df.drop(columns=[target_col])
+        else:
+            target = None
 
-    # Удаляем ненужные столбцы
-    drop_cols = [
-        "id",
-        "логин",
-        "имя",
-        "фамилия",
-        "фио",
-        "должность",
-        "дата_увольнения",
-        "дата_рождения",
-        "дата_приема_в_1с",
-        "текущая_должность_на_портале",
-        "отдел",
-        "уровень_зп",
-    ]
-    df.drop(columns=[col for col in drop_cols if col in df.columns], inplace=True)
+        # Удаляем ненужные столбцы
+        drop_cols = [
+            "id",
+            "логин",
+            "имя",
+            "фамилия",
+            "фио",
+            "должность",
+            "дата_увольнения",
+            "дата_рождения",
+            "дата_приема_в_1с",
+            "текущая_должность_на_портале",
+            "отдел",
+            "уровень_зп",
+        ]
+        df.drop(columns=[col for col in drop_cols if col in df.columns], inplace=True)
 
-    for col in df.columns:
-        if df[col].dtype == "object":
-            df[col] = df[col].fillna("unknown")
-        elif pd.api.types.is_numeric_dtype(df[col]):
-            df[col] = df[col].fillna(df[col].median())
+        for col in df.columns:
+            if df[col].dtype == "object":
+                df[col] = df[col].fillna("unknown")
+            elif pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = df[col].fillna(df[col].median())
 
-    # Преобразование категориальных признаков
-    for col in df.select_dtypes(include=["object"]).columns:
-        le = LabelEncoder()
-        df[col] = le.fit_transform(df[col].astype(str))
+        # Преобразование категориальных признаков
+        for col in df.select_dtypes(include=["object"]).columns:
+            le = LabelEncoder()
+            df[col] = le.fit_transform(df[col].astype(str))
 
-    # Удаляем datetime-признаки, если остались
-    df = df.drop(columns=df.select_dtypes(include=["datetime"]).columns)
+        # Удаляем datetime-признаки, если остались
+        df = df.drop(columns=df.select_dtypes(include=["datetime"]).columns)
 
-    # Масштабирование числовых признаков
-    numeric_cols = df.select_dtypes(include=["number"]).columns
-    if not df[numeric_cols].empty:
-        scaler = StandardScaler()
-        df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
+        # Масштабирование числовых признаков
+        numeric_cols = df.select_dtypes(include=["number"]).columns
+        if not df[numeric_cols].empty:
+            scaler = StandardScaler()
+            df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
 
-    # Возвращаем таргет
-    if target is not None:
-        df[target_col] = target
+        # Возвращаем таргет
+        if target is not None:
+            df[target_col] = target
 
-    return df
+        return df
+    except Exception as e:
+        logger.info(f"Ошибка: {e}")
+        raise
 
 
 def add_predictions_to_excel(data, model, result_file, threshold):
-    # Фильтрация данных для предсказания
-    filtered_data = data[data["дата_увольнения"].isna()]
+    try:
+        # Фильтрация данных для предсказания
+        filtered_data = data[data["дата_увольнения"].isna()]
 
-    # Очистка и предобработка данных
-    cleaned_data = clean_encode_scale(filtered_data)
+        # Очистка и предобработка данных
+        cleaned_data = clean_encode_scale(filtered_data)
 
-    # Предсказания модели
-    probabilities = model.predict_proba(cleaned_data.drop(columns=["уволен"]))[:, 1]
-    predictions = (probabilities >= threshold).astype(int)
+        # Предсказания модели
+        probabilities = model.predict_proba(cleaned_data.drop(columns=["уволен"]))[:, 1]
+        predictions = (probabilities >= threshold).astype(int)
 
-    # Создание DataFrame с результатами
-    results = pd.DataFrame(
-        {
-            "фио": filtered_data["фио"].values,
-            "уволен": 0,
-            "предсказание_увольнения": predictions,
-        }
-    )
+        # Создание DataFrame с результатами
+        results = pd.DataFrame(
+            {
+                "фио": filtered_data["фио"].values,
+                "уволен": 0,
+                "предсказание_увольнения": predictions,
+            }
+        )
 
-    # Обновление столбца "уволен" для тех, у кого есть дата увольнения
-    data["уволен"] = data["дата_увольнения"].notna().astype(int)
+        # Обновление столбца "уволен" для тех, у кого есть дата увольнения
+        data["уволен"] = data["дата_увольнения"].notna().astype(int)
 
-    # Проверка наличия файла и чтение существующих данных
-    if os.path.exists(result_file):
-        existing_results = pd.read_excel(result_file)
-    else:
-        existing_results = pd.DataFrame()
-
-    # Текущая дата
-    current_date = datetime.now().strftime("%d.%m.%Y")
-
-    # Добавление столбца с текущей датой, если его нет
-    if current_date not in existing_results.columns:
-        existing_results[current_date] = None
-
-    # Проверка наличия столбца 'фио' в существующих результатах
-    if "фио" not in existing_results.columns:
-        existing_results["фио"] = None
-
-    # Обновление существующих данных новыми предсказаниями
-    for index, row in results.iterrows():
-        fio = row["фио"]
-        if fio in existing_results["фио"].values:
-            existing_results.loc[existing_results["фио"] == fio, current_date] = probabilities[
-                index
-            ]
+        # Проверка наличия файла и чтение существующих данных
+        if os.path.exists(result_file):
+            existing_results = pd.read_excel(result_file)
         else:
-            new_row = row.to_dict()
-            new_row[current_date] = probabilities[index]
-            existing_results = existing_results._append(new_row, ignore_index=True)
+            existing_results = pd.DataFrame()
 
-    # Запись результатов в Excel
-    existing_results.to_excel(result_file, index=False)
+        # Текущая дата
+        current_date = datetime.now().strftime("%d.%m.%Y")
+
+        # Добавление столбца с текущей датой, если его нет
+        if current_date not in existing_results.columns:
+            existing_results[current_date] = None
+
+        # Проверка наличия столбца 'фио' в существующих результатах
+        if "фио" not in existing_results.columns:
+            existing_results["фио"] = None
+
+        # Обновление существующих данных новыми предсказаниями
+        for index, row in results.iterrows():
+            fio = row["фио"]
+            if fio in existing_results["фио"].values:
+                existing_results.loc[existing_results["фио"] == fio, current_date] = probabilities[
+                    index
+                ]
+            else:
+                new_row = row.to_dict()
+                new_row[current_date] = probabilities[index]
+                existing_results = existing_results._append(new_row, ignore_index=True)
+
+        # Запись результатов в Excel
+        existing_results.to_excel(result_file, index=False)
+    except Exception as e:
+        logger.info(f"Ошибка: {e}")
+        raise
 
 
 def find_best_threshold(y_true, y_probs):
-    thresholds = np.arange(1.0, 0.0, -0.001)
-    costs = []
+    try:
+        thresholds = np.arange(1.0, 0.0, -0.001)
+        costs = []
 
-    for threshold in thresholds:
-        predictions = (y_probs >= threshold).astype(int)
-        cm = confusion_matrix(y_true, predictions)
-        tn, fp, fn, tp = cm.ravel()
+        for threshold in thresholds:
+            predictions = (y_probs >= threshold).astype(int)
+            cm = confusion_matrix(y_true, predictions)
+            tn, fp, fn, tp = cm.ravel()
 
-        # Определяем "стоимость" на основе ваших требований
-        cost = (1 * tn) - (1 * fp) - (1 * fn) + (1 * tp)
-        costs.append(cost)
+            # Определяем "стоимость" на основе ваших требований
+            cost = (1 * tn) - (1 * fp) - (1 * fn) + (1 * tp)
+            costs.append(cost)
 
-    # Находим порог, при котором "стоимость" максимальна
-    optimal_threshold_index = np.argmax(costs)
-    optimal_threshold = thresholds[optimal_threshold_index]
+        # Находим порог, при котором "стоимость" максимальна
+        optimal_threshold_index = np.argmax(costs)
+        optimal_threshold = thresholds[optimal_threshold_index]
 
-    return optimal_threshold
+        return optimal_threshold
+    except Exception as e:
+        logger.info(f"Ошибка: {e}")
+        raise
 
 
 def print_confusion_matrix(data, model):
-    # Очистка и предобработка данных
-    cleaned_data = clean_encode_scale(data)
+    try:
+        # Очистка и предобработка данных
+        cleaned_data = clean_encode_scale(data)
 
-    # Предсказания модели
-    probabilities = model.predict_proba(cleaned_data.drop(columns=["уволен"]))[:, 1]
+        # Предсказания модели
+        probabilities = model.predict_proba(cleaned_data.drop(columns=["уволен"]))[:, 1]
 
-    # Фактические значения
-    actual = cleaned_data["уволен"].astype(float).astype(int)  # Преобразуем в int
+        # Фактические значения
+        actual = cleaned_data["уволен"].astype(float).astype(int)  # Преобразуем в int
 
-    # Подбор лучшего порога
-    best_threshold = find_best_threshold(actual, probabilities)
+        # Подбор лучшего порога
+        best_threshold = find_best_threshold(actual, probabilities)
 
-    # Применение лучшего порога
-    predictions = (probabilities >= best_threshold).astype(int)
+        # Применение лучшего порога
+        predictions = (probabilities >= best_threshold).astype(int)
 
-    # Матрица ошибок
-    cm = confusion_matrix(actual, predictions)
-    # print("Confusion Matrix with best threshold:")
-    # print(cm)
+        # Матрица ошибок
+        cm = confusion_matrix(actual, predictions)
+        # print("Confusion Matrix with best threshold:")
+        # print(cm)
 
-    # Отчет о классификации
-    report = classification_report(actual, predictions)
-    # print("\nClassification Report:")
-    # print(report)
+        # Отчет о классификации
+        report = classification_report(actual, predictions)
+        # print("\nClassification Report:")
+        # print(report)
 
-    # print(f"\nBest threshold: {best_threshold}")
+        # print(f"\nBest threshold: {best_threshold}")
 
-    return best_threshold
+        return best_threshold
+    except Exception as e:
+        logger.info(f"Ошибка: {e}")
+        raise
 
 
 if __name__ == "__main__":
