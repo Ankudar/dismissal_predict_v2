@@ -1,3 +1,4 @@
+import logging
 import os
 import warnings
 
@@ -15,6 +16,9 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import cross_val_score, train_test_split
 from xgboost import XGBClassifier
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Пути
 DATA_PROCESSED = "/home/root6/python/dismissal_predict_v2/data/processed"
@@ -78,12 +82,14 @@ def objective(trial, X_train, y_train):
 def run_optuna_experiment(
     X_train, y_train, X_test, y_test, metric, n_trials, experiment_name, model_output_path
 ):
+    logger.info(f"Tracking URI: {mlflow.get_tracking_uri()}")
+    logger.info(f"Experiment: {experiment_name}")
     mlflow.set_experiment(experiment_name)
 
     def optuna_objective(trial):
         return objective(trial, X_train, y_train)
 
-    study = optuna.create_study(direction="maximize")
+    study = optuna.create_study(study_name=experiment_name, direction="maximize")
     study.optimize(optuna_objective, n_trials=n_trials)
 
     best_params = study.best_trial.params
@@ -112,15 +118,15 @@ def run_optuna_experiment(
 
         # Сравнение метрик
         if final_accuracy > existing_accuracy:
-            print("Новая модель лучше сохраненной, сохраняем.")
+            logger.info("Новая модель лучше сохраненной, сохраняем.")
             joblib.dump(final_model, model_output_path)
         else:
-            print("Сохраненная модель лучше полученной, оставляем без изменений.")
+            logger.info("Сохраненная модель лучше полученной, оставляем без изменений.")
     else:
-        print("Сохраняем модель, т.к. других еще не было.")
+        logger.info("Сохраняем модель, т.к. других еще не было.")
         joblib.dump(final_model, model_output_path)
 
-    input_example = X_test.iloc[0].to_dict()
+    input_example = X_test.iloc[[0]]
 
     with mlflow.start_run(run_name="final_model"):
         mlflow.log_params(best_params)
@@ -137,6 +143,7 @@ def run_optuna_experiment(
 
 
 if __name__ == "__main__":
+    mlflow.set_tracking_uri("file:///home/root6/python/dismissal_predict_v2/mlruns")
     main_users = convert_to_numeric(main_users)
     top_users = convert_to_numeric(top_users)
 
