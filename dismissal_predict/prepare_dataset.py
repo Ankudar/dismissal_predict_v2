@@ -101,7 +101,7 @@ def process_last_users_from_cadr(input_file, output_dir):
 def process_children(input_file, output_dir):
     try:
         df = pd.read_csv(input_file, header=0)
-        columns_to_copy = ["ID", "NAME", "DATE_BIRTH", "GENDER"]
+        columns_to_copy = ["USER_ID", "NAME", "DATE_BIRTH", "GENDER"]
 
         df.columns = df.columns.str.strip()
         missing_columns = [col for col in columns_to_copy if col not in df.columns]
@@ -109,7 +109,9 @@ def process_children(input_file, output_dir):
             return
 
         processed_data = df[columns_to_copy]
+        processed_data.rename(columns={"USER_ID": "id"}, inplace=True)  # Переименование столбца
         processed_data = prepare_data(processed_data)
+        print(processed_data.info())
 
         output_file = os.path.join(output_dir, "children.csv")
         processed_data.to_csv(output_file, index=False, encoding="utf-8")

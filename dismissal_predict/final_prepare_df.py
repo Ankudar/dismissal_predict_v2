@@ -1,10 +1,13 @@
 from datetime import datetime
 import logging
+import re
 
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import LabelEncoder, OrdinalEncoder, StandardScaler
+from rusgenderdetection import get_gender  # type: ignore
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, OrdinalEncoder
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,25 +49,41 @@ class DataPreprocessor:
     def __init__(self):
         self.cat_cols = []
         self.ordinal_encoder = None
+        self.onehot_encoder = None
         self.scaler = None
-        self.target_col = "уволен"
         self.numeric_cols = []
+        self.preprocessor = None
 
     def save(self, path_prefix):
         joblib.dump(self.ordinal_encoder, f"{path_prefix}_ordinal_encoder.pkl")
+        joblib.dump(self.onehot_encoder, f"{path_prefix}_onehot_encoder.pkl")
         joblib.dump(self.scaler, f"{path_prefix}_scaler.pkl")
         joblib.dump(self.cat_cols, f"{path_prefix}_cat_cols.pkl")
         joblib.dump(self.numeric_cols, f"{path_prefix}_numeric_cols.pkl")
+        joblib.dump(self.preprocessor, f"{path_prefix}_preprocessor.pkl")
 
     def load(self, path_prefix):
         self.ordinal_encoder = joblib.load(f"{path_prefix}_ordinal_encoder.pkl")
+        self.onehot_encoder = joblib.load(f"{path_prefix}_onehot_encoder.pkl")
         self.scaler = joblib.load(f"{path_prefix}_scaler.pkl")
         self.cat_cols = joblib.load(f"{path_prefix}_cat_cols.pkl")
         self.numeric_cols = joblib.load(f"{path_prefix}_numeric_cols.pkl")
+        self.preprocessor = joblib.load(f"{path_prefix}_preprocessor.pkl")
+
+    def _handle_nans(self, df):
+        for col in self.numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = df[col].fillna(df[col].median())
+        return df
 
     def fit(self, df: pd.DataFrame):
         df = df.copy()
         df.drop(columns=[col for col in DROP_COLS if col in df.columns], inplace=True)
+
+        # Сохраняем столбец 'уволен' для последующего добавления
+        if "уволен" in df.columns:
+            uvolen_series = df["уволен"]
+            df.drop(columns=["уволен"], inplace=True)
 
         # Категориальные признаки
         self.cat_cols = df.select_dtypes(include=["object"]).columns.tolist()
@@ -72,30 +91,44 @@ class DataPreprocessor:
             df[col] = df[col].astype(str).fillna("other")
 
         # Числовые признаки
-        for col in df.select_dtypes(include=["number"]).columns:
-            df[col] = df[col].fillna(df[col].median())
-
-        # Ordinal encoding
-        self.ordinal_encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
-        df[self.cat_cols] = self.ordinal_encoder.fit_transform(df[self.cat_cols])
-
-        # Масштабирование числовых признаков (кроме целевой переменной)
         self.numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-        if self.target_col in self.numeric_cols:
-            self.numeric_cols.remove(self.target_col)
+        df = self._handle_nans(df)
 
-        self.scaler = StandardScaler()
-        df[self.numeric_cols] = self.scaler.fit_transform(df[self.numeric_cols])
+        # Разделение категориальных признаков на OneHot и Ordinal
+        onehot_cols = [col for col in self.cat_cols if df[col].nunique() <= 10]
+        ordinal_cols = [col for col in self.cat_cols if df[col].nunique() >= 11]
 
-        # Удаляем NaN, если остались
-        if df.isnull().any().any():
-            df = df.fillna(0)
+        self.onehot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+        self.ordinal_encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
 
-        return df
+        self.preprocessor = ColumnTransformer(
+            transformers=[
+                ("onehot", self.onehot_encoder, onehot_cols),
+                ("ordinal", self.ordinal_encoder, ordinal_cols),
+                ("num", MinMaxScaler(), self.numeric_cols),
+            ],
+            remainder="passthrough",
+        )
+
+        df_transformed = self.preprocessor.fit_transform(df)
+        df_transformed = pd.DataFrame(
+            df_transformed, columns=self.preprocessor.get_feature_names_out()  # type: ignore
+        )
+
+        # Добавляем столбец 'уволен' обратно
+        if "уволен" in df.columns:
+            df_transformed["уволен"] = uvolen_series.values
+
+        return df_transformed
 
     def transform(self, df: pd.DataFrame):
         df = df.copy()
         df.drop(columns=[col for col in DROP_COLS if col in df.columns], inplace=True)
+
+        # Сохраняем столбец 'уволен' для последующего добавления
+        if "уволен" in df.columns:
+            uvolen_series = df["уволен"]
+            df.drop(columns=["уволен"], inplace=True)
 
         # Убедимся, что все необходимые категориальные колонки присутствуют
         for col in self.cat_cols:
@@ -104,24 +137,19 @@ class DataPreprocessor:
             df[col] = df[col].astype(str).fillna("other")
 
         # Обрабатываем числовые признаки
-        for col in self.numeric_cols:
-            if col not in df.columns:
-                df[col] = np.nan
-
-        for col in df.select_dtypes(include=["number"]).columns:
-            df[col] = df[col].fillna(df[col].median())
+        df = self._handle_nans(df)
 
         # Преобразуем категориальные признаки
-        df[self.cat_cols] = self.ordinal_encoder.transform(df[self.cat_cols])  # type: ignore
+        df_transformed = self.preprocessor.transform(df)  # type: ignore
+        df_transformed = pd.DataFrame(
+            df_transformed, columns=self.preprocessor.get_feature_names_out()  # type: ignore
+        )
 
-        # Масштабируем числовые признаки
-        df[self.numeric_cols] = self.scaler.transform(df[self.numeric_cols])  # type: ignore
+        # Добавляем столбец 'уволен' обратно
+        if "уволен" in df.columns:
+            df_transformed["уволен"] = uvolen_series.values
 
-        # Удаляем NaN, если остались
-        if df.isnull().any().any():
-            df = df.fillna(0)
-
-        return df
+        return df_transformed
 
 
 def merge_base(bases, index, merge_type):
@@ -129,31 +157,24 @@ def merge_base(bases, index, merge_type):
         merged_df = bases[0]
         for base in bases[1:]:
             merged_df = pd.merge(merged_df, base, on=index, how=merge_type)
-
         return merged_df
     except Exception as e:
-        logger.info(f"Ошибка: {e}")
+        logger.info(f"Ошибка при объединении: {e}")
         raise
 
 
 def convert_dates(df):
     try:
-        target_format = "%d.%m.%Y %H:%M:%S"
-
-        df["дата_рождения"] = pd.to_datetime(
-            df["дата_рождения"], format="%d.%m.%Y", errors="coerce"
-        )
-        df["дата_приема_в_1с"] = pd.to_datetime(
-            df["дата_приема_в_1с"], format="%Y-%m-%d", errors="coerce"
-        )
-
-        date_columns = ["дата_увольнения", "дата_рождения", "дата_приема_в_1с"]
+        # Форматы, которые могут встречаться в данных
+        date_columns = ["дата_рождения", "дата_увольнения", "дата_приема_в_1с"]
         for col in date_columns:
-            df[col] = pd.to_datetime(df[col], format=target_format, errors="coerce")
+            df[col] = pd.to_datetime(
+                df[col], errors="coerce"
+            )  # Автоматическое определение формата
 
         return df
     except Exception as e:
-        logger.info(f"Ошибка: {e}")
+        logger.info(f"Ошибка при конвертации дат: {e}")
         raise
 
 
@@ -163,31 +184,47 @@ def mode_with_tie(series):
             return "none"
 
         counts = series.value_counts()
-        max_count = counts.max()
-        modes = counts[counts == max_count].index.tolist()
+        m_count = counts.get("m", 0)
+        f_count = counts.get("f", 0)
 
-        # Приводим f/m и m/f к одному виду
-        normalized_modes = set()
-        for mode in modes:
-            if mode in ["f/m", "m/f"]:
-                normalized_modes.add("m/f")
-            else:
-                normalized_modes.add(mode)
-
-        return "/".join(sorted(normalized_modes))
+        if m_count > f_count:
+            return "m"
+        elif f_count > m_count:
+            return "f"
+        else:
+            return "mf"
     except Exception as e:
         logger.info(f"Ошибка в mode_with_tie: {e}")
         raise
 
 
+def extract_first_name(full_name):
+    # Проверка на NaN
+    if pd.isna(full_name):
+        return ""
+    parts = full_name.split()
+    return parts[1] if len(parts) > 1 else ""
+
+
+def determine_gender(full_name):
+    first_name = extract_first_name(full_name)
+    if first_name:
+        gender = get_gender(first_name)
+        if gender == 0:
+            return "женский"
+        elif gender == 1:
+            return "мужской"
+        else:
+            return "неизвестно"
+    return "неизвестно"
+
+
 def main_prepare_for_all(main_users, users_salary, users_cadr, children):
     try:
         today = pd.to_datetime(datetime.now().date())
-
         children["date_birth"] = pd.to_datetime(
             children["date_birth"], format="%d.%m.%Y", errors="coerce"
         )
-
         children["age"] = ((datetime.now() - children["date_birth"]).dt.days / 365).round(1)
 
         grouped_children = (
@@ -195,10 +232,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
             .agg(
                 child_num=("name", "count"),
                 avg_child_age=("age", "mean"),
-                main_child_gender=(
-                    "gender",
-                    mode_with_tie,
-                ),
+                main_child_gender=("gender", mode_with_tie),
             )
             .reset_index()
         )
@@ -221,7 +255,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
             "двадцать тест",
         ]
         main_users = main_users[~main_users["логин"].isin(logins_to_remove)]
-        main_users["пол"] = main_users["пол"].fillna("unknown")
+        main_users["пол"] = main_users["фио"].apply(determine_gender)
         main_users.replace("nan", pd.NA, inplace=True)
         main_users = main_users.dropna(subset=["имя", "фамилия"])
         main_users = convert_dates(main_users)
@@ -231,16 +265,22 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users["ср_зп"] = main_users["ср_зп"].astype(float)
         main_users["уволен"] = main_users["дата_увольнения"].notna().astype(int)
 
+        main_users["дата_увольнения"] = pd.to_datetime(
+            main_users["дата_увольнения"], errors="coerce"
+        )
+
         main_users["возраст"] = np.where(
             main_users["дата_рождения"].notna(),
             (today - main_users["дата_рождения"]).dt.days // 365,  # type: ignore
             np.nan,
         )
+
         main_users["стаж"] = np.where(
             main_users["дата_увольнения"].notna(),
             (main_users["дата_увольнения"] - main_users["дата_приема_в_1с"]).dt.days / 365,
             (today - main_users["дата_приема_в_1с"]).dt.days / 365,  # type: ignore
         )
+
         main_users["стаж"] = np.maximum(main_users["стаж"], 0)
 
         non_null_positions = main_users["текущая_должность_на_портале"].dropna().unique()
@@ -257,6 +297,11 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
 
         preprocessor = DataPreprocessor()
         main_users_for_train = preprocessor.fit(main_users)
+        main_users_for_train.to_csv(f"{DATA_PROCESSED}/main_users_for_train.csv", index=False)
+
+        if "уволен" in main_users.columns:
+            main_users_for_train["уволен"] = main_users["уволен"].values
+
         main_users_for_train.to_csv(f"{DATA_PROCESSED}/main_users_for_train.csv", index=False)
 
         preprocessor.save(f"{DATA_PROCESSED}/preprocessor")
@@ -294,7 +339,14 @@ def prepare_with_mic():
     preprocessor = DataPreprocessor()
     preprocessor.load(f"{DATA_PROCESSED}/preprocessor")
 
+    if "уволен" in main_top.columns:
+        uvolen_series = main_top["уволен"].astype(int)  # Преобразуем в int
+
     main_top_for_train = preprocessor.transform(main_top)
+
+    if "уволен" in main_top.columns:
+        main_top_for_train["уволен"] = uvolen_series.values
+
     main_top_for_train.to_csv(f"{DATA_PROCESSED}/main_top_for_train.csv", index=False)
     print(
         "NaNs in main_top_for_train:\n",
@@ -308,6 +360,6 @@ def run_all():
 
 
 if __name__ == "__main__":
-    logger.info(f"Финальная подготовка баз началась")
+    logger.info("Финальная подготовка баз началась")
     run_all()
-    logger.info(f"Финальная подготовка баз завершилась")
+    logger.info("Финальная подготовка баз завершилась")
