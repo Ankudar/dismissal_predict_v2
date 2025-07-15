@@ -111,7 +111,6 @@ def process_children(input_file, output_dir):
         processed_data = df[columns_to_copy]
         processed_data.rename(columns={"USER_ID": "id"}, inplace=True)  # Переименование столбца
         processed_data = prepare_data(processed_data)
-        print(processed_data.info())
 
         output_file = os.path.join(output_dir, "children.csv")
         processed_data.to_csv(output_file, index=False, encoding="utf-8")

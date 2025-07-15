@@ -1,6 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-import getpass
 import logging
 import os
 import shutil
@@ -9,6 +8,8 @@ import time
 import traceback
 
 from config import MAIN_CONFIGS, Config
+
+# import getpasspip
 import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -299,12 +300,12 @@ def get_1c_zup(base_name, server_1c, login, password):
 
 
 def run_all():
-    # get_latest_file(cadr_users_list_url)
-    # get_portal_users(portal_users_link)
-    # get_portal_children(portal_children_link)
-    # get_whisper_stat(whisper_data)
-    # get_1c_zup(Ref_zup, Srvr_zup, login_1c, password_1c)
-    pass
+    get_latest_file(cadr_users_list_url)
+    get_portal_users(portal_users_link)
+    get_portal_children(portal_children_link)
+    get_whisper_stat(whisper_data)
+    get_1c_zup(Ref_zup, Srvr_zup, login_1c, password_1c)
+    # pass
 
 
 if __name__ == "__main__":

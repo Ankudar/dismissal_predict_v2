@@ -74,6 +74,10 @@ class DataPreprocessor:
         for col in self.numeric_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce")
             df[col] = df[col].fillna(df[col].median())
+
+        # if "категория" in df.columns:
+        #     df["категория"] = df["категория"].fillna("other")
+
         return df
 
     def fit(self, df: pd.DataFrame):
@@ -165,12 +169,22 @@ def merge_base(bases, index, merge_type):
 
 def convert_dates(df):
     try:
-        # Форматы, которые могут встречаться в данных
         date_columns = ["дата_рождения", "дата_увольнения", "дата_приема_в_1с"]
+
+        # Замена пропусков на '1970-01-01 00:00:00'
         for col in date_columns:
-            df[col] = pd.to_datetime(
-                df[col], errors="coerce"
-            )  # Автоматическое определение формата
+            df[col] = df[col].fillna("1970-01-01 00:00:00")
+
+        # Конвертация в datetime с учетом разных форматов
+        df["дата_рождения"] = pd.to_datetime(
+            df["дата_рождения"], format="%d.%m.%Y", errors="coerce"
+        )
+        df["дата_увольнения"] = pd.to_datetime(
+            df["дата_увольнения"], format="%d.%m.%Y %H:%M:%S", errors="coerce"
+        )
+        df["дата_приема_в_1с"] = pd.to_datetime(
+            df["дата_приема_в_1с"], format="%Y-%m-%d", errors="coerce"
+        )
 
         return df
     except Exception as e:
@@ -297,7 +311,6 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
 
         preprocessor = DataPreprocessor()
         main_users_for_train = preprocessor.fit(main_users)
-        main_users_for_train.to_csv(f"{DATA_PROCESSED}/main_users_for_train.csv", index=False)
 
         if "уволен" in main_users.columns:
             main_users_for_train["уволен"] = main_users["уволен"].values
@@ -336,18 +349,18 @@ def prepare_with_mic():
 
     main_top.to_csv(f"{DATA_PROCESSED}/main_top.csv", index=False)
 
-    preprocessor = DataPreprocessor()
-    preprocessor.load(f"{DATA_PROCESSED}/preprocessor")
+    # 👉 Новый препроцессор только для main_top
+    preprocessor_top = DataPreprocessor()
+    main_top_for_train = preprocessor_top.fit(main_top)
 
     if "уволен" in main_top.columns:
-        uvolen_series = main_top["уволен"].astype(int)  # Преобразуем в int
-
-    main_top_for_train = preprocessor.transform(main_top)
-
-    if "уволен" in main_top.columns:
-        main_top_for_train["уволен"] = uvolen_series.values
+        main_top_for_train["уволен"] = main_top["уволен"].values
 
     main_top_for_train.to_csv(f"{DATA_PROCESSED}/main_top_for_train.csv", index=False)
+
+    # 💾 Сохраним отдельный препроцессор
+    preprocessor_top.save(f"{DATA_PROCESSED}/preprocessor_top")
+
     print(
         "NaNs in main_top_for_train:\n",
         main_top_for_train.isnull().sum()[main_top_for_train.isnull().any()],

@@ -10,7 +10,7 @@ import mlflow.sklearn
 import numpy as np
 import optuna
 import pandas as pd
-import shap # type: ignore
+import shap  # type: ignore
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     RocCurveDisplay,
@@ -22,6 +22,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import cross_val_score, train_test_split
+from tqdm import tqdm
 from xgboost import XGBClassifier
 
 logging.basicConfig(level=logging.INFO)
@@ -38,7 +39,7 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 # Константы
 TEST_SIZE = 0.2
 RANDOM_STATE = 20
-N_TRIALS = 1
+N_TRIALS = 20
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
 MLFLOW_EXPERIMENT_TOP = "xgboost_top_users"
 METRIC_TO_OPTIMIZE = "accuracy"
@@ -51,8 +52,14 @@ warnings.filterwarnings("ignore")
 main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
-logger.info(f"main_users shape: {main_users.shape}")
-logger.info(f"top_users shape: {top_users.shape}")
+
+def is_new_model_better(new_metrics, old_metrics, metric):
+    return new_metrics[metric] > old_metrics.get(metric, 0)
+
+
+def manual_optuna_progress(study, n_trials, func):
+    for _ in tqdm(range(n_trials), desc="Optuna Tuning"):
+        study.optimize(func, n_trials=1, catch=(Exception,))
 
 
 def convert_all_to_float(df: pd.DataFrame, exclude_cols=None):
@@ -113,12 +120,12 @@ def split_df(data):
         raise
 
 
-def objective(trial, X_train, y_train, metric="f1"):
+def objective(trial, X_train, y_train, metric=METRIC_TO_OPTIMIZE):
     try:
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 2, 50),
             "max_depth": trial.suggest_int("max_depth", 2, 50),
-            "learning_rate": trial.suggest_float("learning_rate", 0.1, 0.7),
+            "learning_rate": trial.suggest_float("learning_rate", 0.1, 0.5),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
             "random_state": RANDOM_STATE,
@@ -129,7 +136,10 @@ def objective(trial, X_train, y_train, metric="f1"):
 
         model = XGBClassifier(**params)
         scores = cross_val_score(model, X_train, y_train, cv=5, scoring=metric)
-        return scores.mean()
+        mean_score = scores.mean()
+        logger.info(f"Trial {trial.number} finished with {metric}: {mean_score}")
+
+        return mean_score
     except Exception as e:
         logger.info(f"Ошибка: {e}")
         raise
@@ -155,9 +165,10 @@ def run_optuna_experiment(
             return objective(trial, X_train, y_train, metric=metric)
 
         study = optuna.create_study(study_name=experiment_name, direction="maximize")
-        study.optimize(optuna_objective, n_trials=n_trials)
+        manual_optuna_progress(study, n_trials, optuna_objective)
 
         best_params = study.best_trial.params
+        best_mean_score = study.best_value  # Получаем лучшее значение mean_score
 
         final_model = XGBClassifier(
             **best_params,
@@ -179,15 +190,34 @@ def run_optuna_experiment(
             "f1": f1_score(y_test, y_pred),
         }
 
-        # Сохранение модели и логирование метрик
-        joblib.dump(
-            {
-                "model": final_model,
-                "threshold": best_threshold,
-                "metrics": final_metrics,
-            },
-            model_output_path,
-        )
+        # Проверка метрик
+        save_model = True
+        if os.path.exists(model_output_path):
+            try:
+                old_model_bundle = joblib.load(model_output_path)
+                old_metrics = old_model_bundle.get("metrics", {})
+                logger.info(f"Старая модель: {old_metrics}")
+                logger.info(f"Новая модель: {final_metrics}")
+                save_model = is_new_model_better(final_metrics, old_metrics, metric)
+
+                if save_model:
+                    logger.info("Новая модель лучше — сохраняем.")
+                else:
+                    logger.info("Старая модель лучше — не сохраняем новую.")
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить старую модель: {e}. Сохраняем новую.")
+                save_model = True
+
+        if save_model:
+            joblib.dump(
+                {
+                    "model": final_model,
+                    "threshold": best_threshold,
+                    "metrics": final_metrics,
+                },
+                model_output_path,
+            )
+            logger.info(f"Модель сохранена в {model_output_path}")
 
         input_example = pd.DataFrame(X_test[:1], columns=X_test.columns)
 
@@ -200,13 +230,19 @@ def run_optuna_experiment(
             mlflow.log_param("model_type", "XGBoostClassifier")
             mlflow.log_param("threshold", round(best_threshold, 4))
             mlflow.log_param("optimized_metric", metric)
+            mlflow.log_metric(f"train_{metric}", round(best_mean_score, 3))  # Логируем mean_score
             mlflow.log_metrics(
                 {
                     **final_metrics,
                     f"optimized_metric_value": round(float(final_metrics[metric]), 3),
                 }
             )
-            mlflow.sklearn.log_model(final_model, name="final_model", input_example=input_example) # type: ignore
+
+            # Логирование модели как артефакта
+            mlflow.log_artifact(model_output_path)
+
+            # Логирование модели в MLflow
+            mlflow.sklearn.log_model(final_model, name="final_model", input_example=input_example)  # type: ignore
 
             # Визуализация матрицы ошибок
             fig_cm, ax_cm = plt.subplots()
@@ -261,29 +297,27 @@ if __name__ == "__main__":
     top_users = top_users.drop_duplicates()
 
     X_train_main, X_test_main, y_train_main, y_test_main = split_df(main_users)
-    for trial in range(N_TRIALS):
-        run_optuna_experiment(
-            X_train_main,
-            y_train_main,
-            X_test_main,
-            y_test_main,
-            metric=METRIC_TO_OPTIMIZE,
-            n_trials=N_TRIALS,
-            experiment_name=MLFLOW_EXPERIMENT_MAIN,
-            model_output_path=f"{MODELS}/xgb_main_users.pkl",
-            current_time=today(),
-        )
+    run_optuna_experiment(
+        X_train_main,
+        y_train_main,
+        X_test_main,
+        y_test_main,
+        metric=METRIC_TO_OPTIMIZE,
+        n_trials=N_TRIALS,
+        experiment_name=MLFLOW_EXPERIMENT_MAIN,
+        model_output_path=f"{MODELS}/xgb_main_users.pkl",
+        current_time=today(),
+    )
 
     X_train_top, X_test_top, y_train_top, y_test_top = split_df(top_users)
-    for trial in range(N_TRIALS):
-        run_optuna_experiment(
-            X_train_top,
-            y_train_top,
-            X_test_top,
-            y_test_top,
-            metric=METRIC_TO_OPTIMIZE,
-            n_trials=N_TRIALS,
-            experiment_name=MLFLOW_EXPERIMENT_TOP,
-            model_output_path=f"{MODELS}/xgb_top_users.pkl",
-            current_time=today(),
-        )
+    run_optuna_experiment(
+        X_train_top,
+        y_train_top,
+        X_test_top,
+        y_test_top,
+        metric=METRIC_TO_OPTIMIZE,
+        n_trials=N_TRIALS,
+        experiment_name=MLFLOW_EXPERIMENT_TOP,
+        model_output_path=f"{MODELS}/xgb_top_users.pkl",
+        current_time=today(),
+    )
