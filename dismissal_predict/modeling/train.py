@@ -39,7 +39,7 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 # Константы
 TEST_SIZE = 0.2
 RANDOM_STATE = 20
-N_TRIALS = 20
+N_TRIALS = 200
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
 MLFLOW_EXPERIMENT_TOP = "xgboost_top_users"
 METRIC_TO_OPTIMIZE = "accuracy"
@@ -123,8 +123,8 @@ def split_df(data):
 def objective(trial, X_train, y_train, metric=METRIC_TO_OPTIMIZE):
     try:
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 2, 50),
-            "max_depth": trial.suggest_int("max_depth", 2, 50),
+            "n_estimators": trial.suggest_int("n_estimators", 2, 100),
+            "max_depth": trial.suggest_int("max_depth", 2, 100),
             "learning_rate": trial.suggest_float("learning_rate", 0.1, 0.5),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
