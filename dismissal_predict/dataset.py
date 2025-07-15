@@ -171,102 +171,95 @@ def get_portal_children(auth_url):
     logger.info("Загрузка детей пользователей с портала завершена")
 
 
-def get_whisper_stat(
-    base_dir,
-    check_list_file=f"{DATA_RAW}/check_list.txt",
-    output_file=f"{DATA_RAW}/whisper_stat.csv",
-):
+def get_whisper_stat(base_dir, check_list_file, output_file):
     logger.info("Загрузка статистики топов")
-    if not os.path.exists(check_list_file):
-        with open(check_list_file, "w", encoding="utf-8") as f:
-            f.write("")
 
-    with open(check_list_file, "r", encoding="utf-8") as f:
-        check_list = set(line.strip() for line in f)
+    # Загружаем check_list
+    check_list = set()
+    if os.path.exists(check_list_file):
+        with open(check_list_file, "r", encoding="utf-8") as f:
+            check_list = set(line.strip() for line in f)
 
-    all_files = set()
-    for root, dirs, files in os.walk(base_dir):
-        for file in files:
-            if file.endswith(".txt"):
-                full_path = os.path.join(root, file)
-                all_files.add(full_path)
+    # Получаем список файлов
+    all_files = {
+        os.path.join(root, file)
+        for root, _, files in os.walk(base_dir)
+        for file in files
+        if file.endswith(".txt")
+    }
 
-    files_to_process = all_files - check_list
+    files_to_process = list(all_files - check_list)
 
-    if not os.path.exists(output_file):
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write("")
+    results = []
+    new_check_entries = []
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {
-            executor.submit(
-                process_file, file, check_list_file, output_file, files_to_process
-            ): file
-            for file in files_to_process
-        }
+    cpu_count = os.cpu_count() or 2
+    with ThreadPoolExecutor(max_workers=max(1, os.cpu_count() // 2)) as executor:  # type: ignore
+        futures = {executor.submit(process_file, file): file for file in files_to_process}
 
-        for future in tqdm(
-            as_completed(futures), total=len(futures), desc="Processing files", unit="file"
-        ):
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Обработка файлов"):
             file = futures[future]
             try:
-                future.result()
+                result = future.result()
+                if result is not None:
+                    row, processed_file_path = result
+                    results.append(row)
+                    new_check_entries.append(processed_file_path)
             except Exception as e:
-                logger.info(f"Error processing file {file}: {e}")
-                logger.info(traceback.format_exc())
-                raise
+                logger.error(f"Ошибка при обработке файла {file}: {e}")
+                logger.error(traceback.format_exc())
 
-    logger.info(f"Всего {len(all_files)} файлов.")
-    logger.info(f"Было обработано ранее {len(check_list)} файлов.")
-    logger.info(f"Было обработано сейчас {len(files_to_process)} файлов.")
-    logger.info("Загрузка статистики топов завершена")
+    # Запись результата одним махом
+    if results:
+        file_exists = os.path.exists(output_file)
+        write_header = not file_exists or os.path.getsize(output_file) == 0
+
+        with open(output_file, "a", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=results[0].keys())
+            if write_header:
+                writer.writeheader()
+            writer.writerows(results)
+
+    # Обновляем check_list
+    if new_check_entries:
+        with open(check_list_file, "a", encoding="utf-8") as f:
+            for path in new_check_entries:
+                f.write(path + "\n")
+
+    logger.info(f"Всего {len(all_files)} файлов. Обработано: {len(results)}.")
 
 
-def process_file(file, check_list_file, output_file, files_to_process):
-    with open(check_list_file, "a", encoding="utf-8") as f:
-        f.write(file + "\n")
-
+def process_file(file_path):
     try:
         summ_check = 0
-        dialog_analysis = {key: "нет" for key in WHISPER_CATEGORIES.keys()}
-        dialog_analysis["Тон"] = "дружественный"  # По умолчанию
+        dialog_analysis = {key: "нет" for key in WHISPER_CATEGORIES}
+        dialog_analysis["Тон"] = "дружественный"
 
-        with open(file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            if len(lines) < 8:
-                return
-            lines = lines[:8]  # Берем первые строки
-            for line in lines:
-                line = line.lower().strip()
-                if line.startswith("[увольнение]"):
-                    dialog_analysis["Увольнение"] = "да" if "да" in line else "нет"
-                elif line.startswith("[оффер]"):
-                    dialog_analysis["Оффер"] = "да" if "да" in line else "нет"
-                elif line.startswith("[вредительство]"):
-                    dialog_analysis["Вредительство"] = "да" if "да" in line else "нет"
-                elif line.startswith("[конфликты]"):
-                    dialog_analysis["Конфликты"] = "да" if "да" in line else "нет"
-                elif line.startswith("[стресс]"):
-                    dialog_analysis["Стресс"] = "да" if "да" in line else "нет"
-                elif line.startswith("[личная жизнь]"):
-                    dialog_analysis["Личная жизнь"] = "да" if "да" in line else "нет"
-                elif line.startswith("[тон]"):
-                    dialog_analysis["Тон"] = (
-                        "негативный" if "негативный" in line else "дружественный"
-                    )
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = [line.lower().strip() for line in f.readlines()[:8]]
 
-        for category, value in dialog_analysis.items():
-            if value == "да":
-                base_weight = WHISPER_CATEGORIES[category]["да"]
-                summ_check += base_weight
+        for line in lines:
+            for cat in WHISPER_CATEGORIES:
+                tag = f"[{cat.lower()}]"
+                if line.startswith(tag):
+                    if cat == "Тон":
+                        dialog_analysis["Тон"] = (
+                            "негативный" if "негативный" in line else "дружественный"
+                        )
+                    else:
+                        dialog_analysis[cat] = "да" if "да" in line else "нет"
+
+        for cat, val in dialog_analysis.items():
+            if val == "да":
+                summ_check += WHISPER_CATEGORIES[cat]["да"]
 
         if summ_check == 0:
-            return
+            return None
 
-        parts = file.split("-")
+        parts = file_path.split("-")
         username = parts[2].split("@")[0]
 
-        new_row = {
+        row = {
             "логин": username,
             "тон": WHISPER_CATEGORIES["Тон"][dialog_analysis["Тон"]],
             "увольнение": WHISPER_CATEGORIES["Увольнение"][dialog_analysis["Увольнение"]],
@@ -277,19 +270,11 @@ def process_file(file, check_list_file, output_file, files_to_process):
             "конфликты": WHISPER_CATEGORIES["Конфликты"][dialog_analysis["Конфликты"]],
         }
 
-        with lock:
-            file_exists = os.path.exists(output_file)
-            write_header = not file_exists or os.path.getsize(output_file) == 0
+        return row, file_path  # Вернём row + info для check_list
 
-            with open(output_file, "a", encoding="utf-8", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=new_row.keys())
-                if write_header:
-                    writer.writeheader()
-                writer.writerow(new_row)
     except Exception as e:
-        logger.info(f"Error processing file {file}: {e}")
-        logger.info(traceback.format_exc())
-        raise
+        logger.error(f"Ошибка в файле {file_path}: {e}")
+        return None
 
 
 def get_1c_zup(base_name, server_1c, login, password):
@@ -305,7 +290,11 @@ def run_all():
     get_latest_file(cadr_users_list_url)
     get_portal_users(portal_users_link)
     get_portal_children(portal_children_link)
-    get_whisper_stat(whisper_data)
+    get_whisper_stat(
+        base_dir=whisper_data,
+        check_list_file=os.path.join(DATA_RAW, "check_list.txt"),
+        output_file=os.path.join(DATA_RAW, "whisper_stat.csv"),
+    )
     get_1c_zup(Ref_zup, Srvr_zup, login_1c, password_1c)
     # pass
 
