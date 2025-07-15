@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import csv
 from datetime import datetime
 import logging
 import os
@@ -277,13 +278,14 @@ def process_file(file, check_list_file, output_file, files_to_process):
         }
 
         with lock:
-            if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
-                df = pd.DataFrame([new_row])
-            else:
-                df = pd.read_csv(output_file)
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            file_exists = os.path.exists(output_file)
+            write_header = not file_exists or os.path.getsize(output_file) == 0
 
-            df.to_csv(output_file, encoding="utf-8", index=False)
+            with open(output_file, "a", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=new_row.keys())
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(new_row)
     except Exception as e:
         logger.info(f"Error processing file {file}: {e}")
         logger.info(traceback.format_exc())
