@@ -1,34 +1,5 @@
 <!DOCTYPE html>
 <html lang="ru">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>dismissal_predict_v2 — Документация</title>
-  <style>
-    body {
-      font-family: system-ui, sans-serif;
-      max-width: 900px;
-      margin: 40px auto;
-      padding: 0 20px;
-      line-height: 1.6;
-    }
-    h1, h2, h3 {
-      color: #ffffffff;
-    }
-    pre {
-      background: #4b4646ff;
-      padding: 10px;
-      border-radius: 6px;
-      overflow-x: auto;
-    }
-    code {
-      background-color: #000000ff;
-      padding: 2px 4px;
-      font-size: 90%;
-      border-radius: 4px;
-    }
-  </style>
-</head>
 <body>
 
 <h1>📊 dismissal_predict_v2 — Предсказание увольнений сотрудников</h1>
