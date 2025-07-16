@@ -172,8 +172,62 @@ pip install graphviz
 <pre><code>airflow dag-processor</code></pre>
 <pre><code>airflow triggerer</code></pre>
 
+<p><strong>🔁 Совет по запуску:</strong></p>
+<p>Рекомендуется использовать терминал <code>Terminator</code> для удобного запуска всех компонентов Airflow в одном окне.</p>
+
+<p>Просто запустите:</p>
+<pre><code>terminator -l airflow</code></pre>
+
+<p>Файл конфигурации layout находится в директории проекта:</p>
+<pre><code>terminator</code></pre>
+
+<h4>📦 Установка Terminator (для Linux)</h4>
+<pre><code>sudo apt update
+sudo apt install terminator
+</code></pre>
+
+<p>Для автозагрузки с готовым layout:</p>
+<pre><code>terminator -l airflow</code></pre>
+<p>Убедитесь, что layout <code>airflow</code> импортирован в настройки Terminator (меню: <em>Preferences → Layouts</em>).</p>
+
+
 <p>DAG-файл проекта находится здесь:</p>
 <pre><code>airflow/dags/dismissal_predict.py</code></pre>
+
+<h3>6️⃣ Установка Google Chrome и ChromeDriver (Linux)</h3>
+<p>Для парсинга данных используется <strong>Google Chrome</strong> и <strong>ChromeDriver</strong>, необходимые для автоматизированной работы через <code>selenium</code> или <code>undetected_chromedriver</code>.</p>
+
+<h4>📦 Установка Google Chrome</h4>
+<pre><code># Скачать .deb-файл
+wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+
+# Установить Google Chrome
+sudo apt install ./google-chrome-stable_current_amd64.deb -y
+</code></pre>
+
+<h4>📦 Установка ChromeDriver</h4>
+<pre><code># Проверка версии установленного Chrome
+google-chrome --version
+# Пример вывода: Google Chrome 124.0.6367.91
+
+# Скачать подходящий ChromeDriver (версия должна совпадать!)
+wget https://storage.googleapis.com/chrome-for-testing-public/124.0.6367.91/linux64/chromedriver-linux64.zip
+
+# Распаковать и установить
+unzip chromedriver-linux64.zip
+sudo mv chromedriver-linux64/chromedriver /usr/local/bin/
+chmod +x /usr/local/bin/chromedriver
+</code></pre>
+
+<h4>✅ Проверка установки</h4>
+<pre><code>chromedriver --version
+# Ожидаемый вывод: ChromeDriver 124.0.6367.91
+</code></pre>
+
+<p><strong>Важно:</strong> путь <code>/usr/local/bin</code> должен быть в переменной окружения <code>$PATH</code>.</p>
+
+<p><strong>В проекте</strong> ChromeDriver используется для входа в защищённые веб-интерфейсы и выгрузки кадровых данных.</p>
+
 
 </body>
 </html>
