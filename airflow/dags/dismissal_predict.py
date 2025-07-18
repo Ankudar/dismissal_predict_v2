@@ -1,86 +1,83 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import subprocess
 
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator  # type: ignore
 
 from airflow import DAG
 
 
-def run_dataset():
-    subprocess.run(
-        [
-            "python",
-            "~/dismissal_predict_v2/dismissal_predict/dataset.py",
+# Универсальная обертка под subprocess
+def make_subprocess_callable(script_path):
+    def _run():
+        subprocess.run(["python", script_path], check=True)
+
+    return _run
+
+
+# Конфигурация пайплайнов
+pipelines = {
+    "weekly_pipeline": {
+        "schedule": "0 4 * * 1",  # каждую неделю в понедельник
+        "tasks": [
+            (
+                "run_dataset",
+                "/home/root6/python/dismissal_predict_v2/dismissal_predict/dataset.py",
+            ),
+            (
+                "run_prepare_dataset",
+                "/home/root6/python/dismissal_predict_v2/dismissal_predict/prepare_dataset.py",
+            ),
+            (
+                "run_final_prepare_df",
+                "/home/root6/python/dismissal_predict_v2/dismissal_predict/final_prepare_df.py",
+            ),
+            (
+                "run_predict",
+                "/home/root6/python/dismissal_predict_v2/dismissal_predict/modeling/predict.py",
+            ),
         ],
-        check=True,
-    )
-
-
-def run_prepare_dataset():
-    subprocess.run(
-        [
-            "python",
-            "~/dismissal_predict_v2/dismissal_predict/prepare_dataset.py",
+    },
+    "train": {
+        "schedule": "0 4 */14 * *",  # раз в 2 недели
+        "tasks": [
+            (
+                "run_train",
+                "/home/root6/python/dismissal_predict_v2/dismissal_predict/modeling/train.py",
+            ),
         ],
-        check=True,
-    )
+    },
+}
 
 
-def run_final_prepare_df():
-    subprocess.run(
-        [
-            "python",
-            "~/dismissal_predict_v2/dismissal_predict/final_prepare_df.py",
-        ],
-        check=True,
+# Общие параметры DAG
+default_args = {
+    "retries": 1,
+    "retry_delay": timedelta(minutes=1),
+    "start_date": datetime(1990, 1, 1),
+}
+
+# Создание DAG-ов
+for dag_id, pipeline in pipelines.items():
+    dag = DAG(
+        dag_id=dag_id,
+        schedule=pipeline["schedule"],
+        default_args=default_args,
+        catchup=False,
+        max_active_runs=1,
+        max_active_tasks=1,
+        tags=["dismissal"],
     )
 
+    with dag:
+        previous_task = None
+        for task_id, script_path in pipeline["tasks"]:
+            task = PythonOperator(
+                task_id=task_id,
+                python_callable=make_subprocess_callable(script_path),
+            )
+            if previous_task:
+                previous_task >> task  # type: ignore
+            previous_task = task
 
-def run_train():
-    subprocess.run(
-        [
-            "python",
-            "~/dismissal_predict_v2/dismissal_predict/modeling/train.py",
-        ],
-        check=True,
-    )
-
-
-def run_predict():
-    subprocess.run(
-        [
-            "python",
-            "~/dismissal_predict_v2/dismissal_predict/modeling/predict.py",
-        ],
-        check=True,
-    )
-
-
-with DAG(
-    dag_id="dismissal_predict_dag",
-    start_date=datetime(1990, 1, 1),
-    schedule="0 4 * * 1",
-    catchup=False,
-) as dag:
-    t1 = PythonOperator(
-        task_id="run_dataset",
-        python_callable=run_dataset,
-    )
-    t2 = PythonOperator(
-        task_id="run_prepare_dataset",
-        python_callable=run_prepare_dataset,
-    )
-    t3 = PythonOperator(
-        task_id="run_final_prepare_df",
-        python_callable=run_final_prepare_df,
-    )
-    t4 = PythonOperator(
-        task_id="run_train",
-        python_callable=run_train,
-    )
-    t5 = PythonOperator(
-        task_id="run_predict",
-        python_callable=run_predict,
-    )
-
-    t1 >> t2 >> t3 >> t4 >> t5  # type: ignore
+    # Регистрация DAG в Airflow
+    globals()[dag_id] = dag
