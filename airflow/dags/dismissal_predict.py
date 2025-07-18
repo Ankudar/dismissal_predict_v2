@@ -6,7 +6,6 @@ from airflow.operators.python import PythonOperator  # type: ignore
 from airflow import DAG
 
 
-# Универсальная обертка под subprocess
 def make_subprocess_callable(script_path):
     def _run():
         subprocess.run(["python", script_path], check=True)
@@ -14,10 +13,9 @@ def make_subprocess_callable(script_path):
     return _run
 
 
-# Конфигурация пайплайнов
 pipelines = {
     "dissmissal_predict_get_data_and_pred": {
-        "schedule": "0 4 * * 1",  # каждую неделю в понедельник
+        "schedule_interval": timedelta(days=3),
         "tasks": [
             (
                 "run_dataset",
@@ -38,7 +36,7 @@ pipelines = {
         ],
     },
     "dissmissal_predict_train": {
-        "schedule": "0 4 */14 * *",  # раз в 2 недели
+        "schedule_interval": timedelta(weeks=2),
         "tasks": [
             (
                 "run_train",
@@ -49,18 +47,18 @@ pipelines = {
 }
 
 
-# Общие параметры DAG
 default_args = {
     "retries": 1,
     "retry_delay": timedelta(minutes=1),
-    "start_date": datetime(1990, 1, 1),
+    "start_date": datetime(2024, 1, 1),
 }
+
 
 # Создание DAG-ов
 for dag_id, pipeline in pipelines.items():
     dag = DAG(
         dag_id=dag_id,
-        schedule=pipeline["schedule"],
+        schedule=pipeline["schedule_interval"],
         default_args=default_args,
         catchup=False,
         max_active_runs=1,
@@ -79,5 +77,4 @@ for dag_id, pipeline in pipelines.items():
                 previous_task >> task  # type: ignore
             previous_task = task
 
-    # Регистрация DAG в Airflow
     globals()[dag_id] = dag
