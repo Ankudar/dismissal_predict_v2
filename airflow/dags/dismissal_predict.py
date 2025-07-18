@@ -16,7 +16,7 @@ def make_subprocess_callable(script_path):
 
 # Конфигурация пайплайнов
 pipelines = {
-    "weekly_pipeline": {
+    "dissmissal_predict_get_data_and_pred": {
         "schedule": "0 4 * * 1",  # каждую неделю в понедельник
         "tasks": [
             (
@@ -37,7 +37,7 @@ pipelines = {
             ),
         ],
     },
-    "train": {
+    "dissmissal_predict_train": {
         "schedule": "0 4 */14 * *",  # раз в 2 недели
         "tasks": [
             (
