@@ -6,6 +6,7 @@ from airflow.operators.python import PythonOperator  # type: ignore
 from airflow import DAG
 
 
+# Универсальная обертка под subprocess
 def make_subprocess_callable(script_path):
     def _run():
         subprocess.run(["python", script_path], check=True)
@@ -13,9 +14,10 @@ def make_subprocess_callable(script_path):
     return _run
 
 
+# Конфигурация пайплайнов
 pipelines = {
     "dissmissal_predict_get_data_and_pred": {
-        "schedule_interval": timedelta(days=3),
+        "schedule": timedelta(days=3),
         "tasks": [
             (
                 "run_dataset",
@@ -36,7 +38,7 @@ pipelines = {
         ],
     },
     "dissmissal_predict_train": {
-        "schedule_interval": timedelta(weeks=2),
+        "schedule": timedelta(weeks=2),
         "tasks": [
             (
                 "run_train",
@@ -47,6 +49,7 @@ pipelines = {
 }
 
 
+# Общие аргументы DAG
 default_args = {
     "retries": 1,
     "retry_delay": timedelta(minutes=1),
@@ -58,11 +61,11 @@ default_args = {
 for dag_id, pipeline in pipelines.items():
     dag = DAG(
         dag_id=dag_id,
-        schedule=pipeline["schedule_interval"],
+        schedule=pipeline["schedule"],
         default_args=default_args,
         catchup=False,
-        max_active_runs=1,
-        max_active_tasks=1,
+        max_active_runs=1,  # Один одновременный запуск DAG
+        max_active_tasks=1,  # Одна одновременная задача внутри DAG
         tags=["dismissal"],
     )
 
@@ -70,8 +73,7 @@ for dag_id, pipeline in pipelines.items():
         previous_task = None
         for task_id, script_path in pipeline["tasks"]:
             task = PythonOperator(
-                task_id=task_id,
-                python_callable=make_subprocess_callable(script_path),
+                task_id=task_id, python_callable=make_subprocess_callable(script_path)
             )
             if previous_task:
                 previous_task >> task  # type: ignore
