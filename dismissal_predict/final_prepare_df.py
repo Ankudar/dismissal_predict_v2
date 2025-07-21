@@ -16,6 +16,7 @@ DATA_INTERIM = "/home/root6/python/dismissal_predict_v2/data/interim"
 DATA_PROCESSED = "/home/root6/python/dismissal_predict_v2/data/processed"
 INPUT_FILE_MAIN_USERS = f"{DATA_INTERIM}/main_users.csv"
 INPUT_FILE_CADR = f"{DATA_INTERIM}/check_last_users_update.csv"
+INPUT_HISTORY_CADR = f"{DATA_INTERIM}/history_cadr_base.csv"
 INPUT_FILE_CHILDREN = f"{DATA_INTERIM}/children.csv"
 INPUT_FILE_STAT = f"{DATA_INTERIM}/whisper_stat.csv"
 INPUT_ZUP_PATH = f"{DATA_INTERIM}/zup.csv"
@@ -40,6 +41,7 @@ FLOAT_COLS = ["тон", "увольнение", "оффер", "вредител�
 
 main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 users_cadr = pd.read_csv(INPUT_FILE_CADR, delimiter=",", decimal=",")
+history_cadr = pd.read_csv(INPUT_HISTORY_CADR, delimiter=",", decimal=",")
 users_salary = pd.read_csv(INPUT_ZUP_PATH, delimiter=",", decimal=",")
 children = pd.read_csv(INPUT_FILE_CHILDREN, delimiter=",", decimal=",")
 stat = pd.read_csv(INPUT_FILE_STAT, delimiter=",", decimal=",")
@@ -167,6 +169,31 @@ def merge_base(bases, index, merge_type):
         raise
 
 
+def merge_fillna(left_df, right_df, on="фио"):
+    # Сливаем по ключу
+    merged = pd.merge(left_df, right_df, on=on, how="outer", suffixes=("_left", "_right"))
+
+    result = merged[[on]].copy()
+
+    # Обрабатываем все колонки, кроме ключа
+    for col in left_df.columns:
+        if col == on:
+            continue
+
+        col_left = f"{col}_left"
+        col_right = f"{col}_right"
+
+        if col_left in merged.columns and col_right in merged.columns:
+            # Если есть оба — заполняем пропуски значениями из правого
+            result[col] = merged[col_left].combine_first(merged[col_right])
+        elif col_left in merged.columns:
+            result[col] = merged[col_left]
+        elif col_right in merged.columns:
+            result[col] = merged[col_right]
+
+    return result
+
+
 def convert_dates(df):
     try:
         date_columns = ["дата_рождения", "дата_увольнения", "дата_приема_в_1с"]
@@ -255,6 +282,12 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
             df["фио"] = df["фио"].str.split().str[:2].str.join(" ")
 
         main_users["фио"] = main_users["фамилия"] + " " + main_users["имя"]
+
+        users_cadr = merge_fillna(users_cadr, history_cadr, on="фио")
+        users_cadr.to_csv(
+            INPUT_HISTORY_CADR, index=False, sep=",", decimal=",", encoding="utf-8-sig"
+        )
+
         main_users = merge_base([main_users, users_cadr], "фио", "left")
         main_users = merge_base([main_users, users_salary], "фио", "left")
         main_users = merge_base([main_users, grouped_children], "id", "left")
