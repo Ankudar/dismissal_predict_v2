@@ -5,6 +5,7 @@ import sys
 
 import joblib
 import pandas as pd
+import shap
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from dismissal_predict import DROP_COLS, FLOAT_COLS, DataPreprocessor
@@ -91,6 +92,28 @@ def add_predictions_to_excel(original_df, model, threshold, result_file, preproc
             }
         )
 
+        # 🔹 SHAP: рассчитываем и сохраняем
+        explainer = shap.Explainer(model)
+        shap_values = explainer(predict_clean)
+
+        # Проверка на пустой список признаков
+        if not features:
+            features = list(predict_clean.columns)
+
+        # Проверка согласованности
+        if shap_values.values.shape[1] != len(features):
+            raise ValueError(
+                f"Количество признаков в SHAP ({shap_values.values.shape[1]}) не совпадает с features ({len(features)})"
+            )
+
+        shap_df = pd.DataFrame(shap_values.values, columns=features)
+        shap_df.insert(0, "фио", predict_df["фио"].values)
+
+        shap_path = result_file.replace(".xlsx", "_shap.csv")
+        shap_df.to_csv(shap_path, index=False, encoding="utf-8-sig")
+        logger.info(f"SHAP значения сохранены в {shap_path}")
+
+        # 🔹 Обновляем Excel
         if os.path.exists(result_file):
             final_df = pd.read_excel(result_file)
             final_df = update_results_with_cadr(final_df, original_df)
