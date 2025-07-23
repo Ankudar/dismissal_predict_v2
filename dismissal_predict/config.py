@@ -47,6 +47,10 @@ class Config:
         url = self.config["links"]["portal_children_link"]
         return url
 
+    def get_portal_director_link(self):
+        url = self.config["links"]["portal_director_link"]
+        return url
+
     def get_portal_users_link(self):
         url = self.config["links"]["portal_users_link"]
         return url

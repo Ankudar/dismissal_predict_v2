@@ -31,6 +31,7 @@ cadr_users_list_url = CONFIG.get_cadr_users_list()
 portal_children_link = CONFIG.get_portal_children_link()
 portal_login, portal_password = CONFIG.get_portal_credentials()
 portal_users_link = CONFIG.get_portal_users_link()
+portal_director_link = CONFIG.get_portal_director_link()
 whisper_data = CONFIG.get_whisper_url()
 WHISPER_CATEGORIES = CONFIG.WHISPER_CATEGORIES
 
@@ -66,12 +67,16 @@ def get_latest_file(directory):
 
 def login(driver, username, password):
     login_input = driver.find_element(
-        By.CSS_SELECTOR, "#authorize > div > div:nth-child(3) > div.login-input-wrap > input"
+        # By.CSS_SELECTOR, "#authorize > div > div:nth-child(3) > div.login-input-wrap > input"
+        By.CSS_SELECTOR,
+        "#workarea-content > div > div > form > div:nth-child(4) > div:nth-child(1) > input",
     )
     login_input.send_keys(username)
 
     password_input = driver.find_element(
-        By.CSS_SELECTOR, "#authorize_password > div.login-input-wrap > input"
+        # By.CSS_SELECTOR, "#authorize_password > div.login-input-wrap > input"
+        By.CSS_SELECTOR,
+        "#workarea-content > div > div > form > div:nth-child(4) > div:nth-child(2) > input",
     )
     password_input.send_keys(password)
     password_input.send_keys(Keys.RETURN)
@@ -169,6 +174,58 @@ def get_portal_children(auth_url):
         if driver:
             driver.quit()
     logger.info("Загрузка детей пользователей с портала завершена")
+
+
+def get_portal_director(auth_url: str):
+    logger.info("Загрузка руководителей пользователей с портала")
+    driver = None
+
+    try:
+        driver = get_driver()
+        driver.get(auth_url)
+        login(driver, portal_login, portal_password)
+
+        # Поиск таблицы
+        table = driver.find_element(By.CSS_SELECTOR, "#workarea-content > div > table")
+        rows = table.find_elements(By.TAG_NAME, "tr")
+
+        data = []
+        for row in rows:
+            cols = row.find_elements(By.TAG_NAME, "td")
+            if cols:
+                data.append([col.text.strip() for col in cols])
+
+        if not data:
+            logger.warning("Таблица пуста или не найдены строки с данными.")
+            return
+
+        # Названия столбцов
+        columns = ["id_сотрудника", "фио", "id_руководителя", "фио_руководителя"]
+        df = pd.DataFrame(data, columns=columns[: len(data[0])])
+
+        # Приведение ID к int с подстановкой значений по умолчанию
+        def clean_id(val, default):
+            try:
+                return int(val)
+            except:
+                return default
+
+        df["id_сотрудника"] = df["id_сотрудника"].apply(lambda x: clean_id(x, -1))
+        df["id_руководителя"] = df["id_руководителя"].apply(lambda x: clean_id(x, 883))
+
+        output_path = os.path.join(DATA_RAW, "director.csv")
+        df.to_csv(output_path, index=False, sep=",")
+        logger.info(f"Данные сохранены в {output_path}.")
+
+    except Exception as e:
+        logger.exception(f"Ошибка при загрузке данных: {e}")
+        raise
+
+    finally:
+        if driver:
+            driver.quit()
+
+    logger.info("Загрузка руководителей пользователей с портала завершена.")
 
 
 def get_whisper_stat(base_dir, check_list_file, output_file):
@@ -290,6 +347,7 @@ def run_all():
     get_latest_file(cadr_users_list_url)
     get_portal_users(portal_users_link)
     get_portal_children(portal_children_link)
+    get_portal_director(portal_director_link)
     get_whisper_stat(
         base_dir=whisper_data,
         check_list_file=os.path.join(DATA_RAW, "check_list.txt"),
