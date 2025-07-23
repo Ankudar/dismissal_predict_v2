@@ -65,28 +65,35 @@ def get_latest_file(directory):
     logger.info("Загрузка кадровых файлов завершена")
 
 
-def login(driver, username, password):
-    login_input = driver.find_element(
-        # By.CSS_SELECTOR, "#authorize > div > div:nth-child(3) > div.login-input-wrap > input"
-        By.CSS_SELECTOR,
-        "#workarea-content > div > div > form > div:nth-child(4) > div:nth-child(1) > input",
-    )
+def login(driver, username, password, auth_url=None):
+    # Выбор селекторов в зависимости от URL
+    if auth_url and "user_admin" in auth_url or auth_url and "i_employees_children" in auth_url:
+        # Страница с Bitrix user_admin
+        login_selector = "#authorize > div > div:nth-child(3) > div.login-input-wrap > input"
+        password_selector = "#authorize_password > div.login-input-wrap > input"
+    else:
+        # Обычная форма авторизации
+        login_selector = (
+            "#workarea-content > div > div > form > div:nth-child(4) > div:nth-child(1) > input"
+        )
+        password_selector = (
+            "#workarea-content > div > div > form > div:nth-child(4) > div:nth-child(2) > input"
+        )
+
+    login_input = driver.find_element(By.CSS_SELECTOR, login_selector)
     login_input.send_keys(username)
 
-    password_input = driver.find_element(
-        # By.CSS_SELECTOR, "#authorize_password > div.login-input-wrap > input"
-        By.CSS_SELECTOR,
-        "#workarea-content > div > div > form > div:nth-child(4) > div:nth-child(2) > input",
-    )
+    password_input = driver.find_element(By.CSS_SELECTOR, password_selector)
     password_input.send_keys(password)
     password_input.send_keys(Keys.RETURN)
+
     time.sleep(2)
 
 
 def get_driver():
     driver_service = Service(executable_path=CHROMEDRIVER_PATH)
     options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
+    # options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -103,11 +110,9 @@ def get_portal_users(auth_url):
     try:
         driver = get_driver()
         driver.get(auth_url)
-        login(driver, portal_login, portal_password)
-
+        login(driver, portal_login, portal_password, auth_url=auth_url)
         driver.get(auth_url)
         downloads_path = os.path.expanduser("~/Downloads")
-        time.sleep(5)
 
         files = os.listdir(downloads_path)
         files = [f for f in files if f.endswith(".xls") or f.endswith(".xlsx")]
@@ -151,7 +156,9 @@ def get_portal_children(auth_url):
     try:
         driver = get_driver()
         driver.get(auth_url)
-        login(driver, portal_login, portal_password)
+        time.sleep(5)
+        login(driver, portal_login, portal_password, auth_url=auth_url)
+        time.sleep(5)
 
         table = driver.find_element(
             By.CSS_SELECTOR, "#form_tbl_perfmon_table6f366e427324b863457a9faef450aed6"
@@ -200,8 +207,8 @@ def get_portal_director(auth_url: str):
             return
 
         # Названия столбцов
-        columns = ["id_сотрудника", "фио", "id_руководителя", "фио_руководителя"]
-        df = pd.DataFrame(data, columns=columns[: len(data[0])])
+        columns = ["id", "фио", "id_руководителя", "фио_руководителя"]
+        df_new = pd.DataFrame(data, columns=columns[: len(data[0])])
 
         # Приведение ID к int с подстановкой значений по умолчанию
         def clean_id(val, default):
@@ -210,12 +217,39 @@ def get_portal_director(auth_url: str):
             except:
                 return default
 
-        df["id_сотрудника"] = df["id_сотрудника"].apply(lambda x: clean_id(x, -1))
-        df["id_руководителя"] = df["id_руководителя"].apply(lambda x: clean_id(x, 883))
+        df_new["id"] = df_new["id"].apply(lambda x: clean_id(x, -1))
+        df_new["id_руководителя"] = df_new["id_руководителя"].apply(lambda x: clean_id(x, 883))
 
+        # Путь к сохранённому файлу
         output_path = os.path.join(DATA_RAW, "director.csv")
-        df.to_csv(output_path, index=False, sep=",")
-        logger.info(f"Данные сохранены в {output_path}.")
+
+        # Если файл уже существует, читаем старую таблицу
+        if os.path.exists(output_path):
+            df_old = pd.read_csv(output_path)
+        else:
+            df_old = pd.DataFrame(columns=columns)
+
+        # Обновляем или добавляем записи
+        df_old.set_index("id", inplace=True)
+        df_new.set_index("id", inplace=True)
+
+        for idx, row in df_new.iterrows():
+            if idx in df_old.index:
+                old_dir_id = df_old.at[idx, "id_руководителя"]
+                new_dir_id = row["id_руководителя"]
+                new_dir_fio = row["фио_руководителя"]
+
+                # Обновляем, если изменился id_руководителя и он не пустой
+                if old_dir_id != new_dir_id and new_dir_id != 883 and new_dir_fio != "":
+                    df_old.at[idx, "id_руководителя"] = new_dir_id
+                    df_old.at[idx, "фио_руководителя"] = new_dir_fio
+            else:
+                # Новый сотрудник — добавляем полностью
+                df_old.loc[idx] = row
+
+        df_old.reset_index(inplace=True)
+        df_old.to_csv(output_path, index=False, sep=",")
+        logger.info(f"Обновлённые данные сохранены в {output_path}.")
 
     except Exception as e:
         logger.exception(f"Ошибка при загрузке данных: {e}")

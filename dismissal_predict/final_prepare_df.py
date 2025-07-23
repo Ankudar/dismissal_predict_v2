@@ -18,6 +18,7 @@ INPUT_FILE_MAIN_USERS = f"{DATA_INTERIM}/main_users.csv"
 INPUT_FILE_CADR = f"{DATA_INTERIM}/check_last_users_update.csv"
 INPUT_HISTORY_CADR = f"{DATA_INTERIM}/history_cadr_base.csv"
 INPUT_FILE_CHILDREN = f"{DATA_INTERIM}/children.csv"
+INPUT_FILE_DIRECTOR = f"{DATA_INTERIM}/director.csv"
 INPUT_FILE_STAT = f"{DATA_INTERIM}/whisper_stat.csv"
 INPUT_ZUP_PATH = f"{DATA_INTERIM}/zup.csv"
 
@@ -39,12 +40,26 @@ DROP_COLS = [
 
 FLOAT_COLS = ["тон", "увольнение", "оффер", "вредительство", "личная жизнь", "стресс", "конфликты"]
 
+LOGINS_TO_REMOVE = [
+    "root24",
+    "root35",
+    "root36",
+    "test.testovich",
+    "система",
+    "admin",
+    "двадцать тест",
+]
+
 main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 users_cadr = pd.read_csv(INPUT_FILE_CADR, delimiter=",", decimal=",")
 history_cadr = pd.read_csv(INPUT_HISTORY_CADR, delimiter=",", decimal=",")
 users_salary = pd.read_csv(INPUT_ZUP_PATH, delimiter=",", decimal=",")
 children = pd.read_csv(INPUT_FILE_CHILDREN, delimiter=",", decimal=",")
+director = pd.read_csv(INPUT_FILE_DIRECTOR, delimiter=",", decimal=",")
 stat = pd.read_csv(INPUT_FILE_STAT, delimiter=",", decimal=",")
+
+
+director = director[["id", "id_руководителя"]].copy()
 
 
 class DataPreprocessor:
@@ -291,17 +306,8 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users = merge_base([main_users, users_cadr], "фио", "left")
         main_users = merge_base([main_users, users_salary], "фио", "left")
         main_users = merge_base([main_users, grouped_children], "id", "left")
-
-        logins_to_remove = [
-            "root24",
-            "root35",
-            "root36",
-            "test.testovich",
-            "система",
-            "admin",
-            "двадцать тест",
-        ]
-        main_users = main_users[~main_users["логин"].isin(logins_to_remove)]
+        main_users = merge_base([main_users, director], "id", "left")
+        main_users = main_users[~main_users["логин"].isin(LOGINS_TO_REMOVE)]
         main_users["пол"] = main_users["фио"].apply(determine_gender)
         main_users.replace("nan", pd.NA, inplace=True)
         main_users = main_users.dropna(subset=["имя", "фамилия"])
@@ -340,6 +346,10 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         position_to_num = {position: idx + 1 for idx, position in enumerate(non_null_positions)}
         main_users["отдел_num"] = main_users["отдел"].map(position_to_num)
 
+        # Расчёт количества подчинённых для каждого id
+        sub_count = main_users["id_руководителя"].value_counts()
+        main_users["подчиненные"] = main_users["id"].apply(lambda x: sub_count.get(x, 0))
+
         main_users.to_csv(f"{DATA_PROCESSED}/main_all.csv", index=False)
 
         preprocessor = DataPreprocessor()
@@ -363,17 +373,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
 def prepare_with_mic():
     main_all = pd.read_csv(f"{DATA_PROCESSED}/main_all.csv", delimiter=",", decimal=",")
     main_top = merge_base([stat, main_all], "логин", "left")
-
-    logins_to_remove = [
-        "root24",
-        "root35",
-        "root36",
-        "test.testovich",
-        "система",
-        "admin",
-        "двадцать тест",
-    ]
-    main_top = main_top[~main_top["логин"].isin(logins_to_remove)]
+    main_top = main_top[~main_top["логин"].isin(LOGINS_TO_REMOVE)]
 
     for col in FLOAT_COLS:
         if col in main_top.columns:

@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 INPUT_FILE_CADR = "/home/root6/python/dismissal_predict_v2/data/raw/last_users_from_cadr.xls"
 INPUT_FILE_CHILDREN = "/home/root6/python/dismissal_predict_v2/data/raw/children.csv"
+INPUT_FILE_DIRECTOR = "/home/root6/python/dismissal_predict_v2/data/raw/director.csv"
 INPUT_FILE_MAIN_USERS = "/home/root6/python/dismissal_predict_v2/data/raw/main_users.csv"
 INPUT_FILE_STAT = "/home/root6/python/dismissal_predict_v2/data/raw/whisper_stat.csv"
 INPUT_ZUP_PATH = "/home/root6/python/dismissal_predict_v2/data/raw/zup"
@@ -114,6 +115,22 @@ def process_children(input_file, output_dir):
         processed_data = prepare_data(processed_data)
 
         output_file = os.path.join(output_dir, "children.csv")
+        processed_data.to_csv(output_file, index=False, encoding="utf-8")
+        logger.info(f"Файл {input_file} успешно обработан и сохранен.")
+    except Exception as e:
+        logger.info(f"Ошибка: {e}")
+        raise
+
+
+def process_director(input_file, output_dir):
+    # здесь просто сохраняем дальше
+    try:
+        df = pd.read_csv(input_file, header=0)
+
+        processed_data = df
+        processed_data = prepare_data(processed_data)
+
+        output_file = os.path.join(output_dir, "director.csv")
         processed_data.to_csv(output_file, index=False, encoding="utf-8")
         logger.info(f"Файл {input_file} успешно обработан и сохранен.")
     except Exception as e:
@@ -246,6 +263,7 @@ def process_zup_path(input_dir, output_dir):
 def run_all():
     process_last_users_from_cadr(INPUT_FILE_CADR, DATA_INTERIM)
     process_children(INPUT_FILE_CHILDREN, DATA_INTERIM)
+    process_director(INPUT_FILE_DIRECTOR, DATA_INTERIM)
     process_main_users(INPUT_FILE_MAIN_USERS, DATA_INTERIM)
     process_whisper_stat(INPUT_FILE_STAT, DATA_INTERIM)
     process_zup_path(INPUT_ZUP_PATH, DATA_INTERIM)
