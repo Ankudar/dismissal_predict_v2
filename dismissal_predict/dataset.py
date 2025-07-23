@@ -46,24 +46,29 @@ def is_valid_date(filename):
 
 
 def get_latest_file(directory):
-    logger.info("Загрузка кадровых файлов")
+    logger.info("📥 Загрузка кадровых файлов")
     latest_file = None
     latest_date = None
 
     for root, _, files in os.walk(directory):
         for file in files:
             if is_valid_date(file):
-                file_date = datetime.strptime(file, "%d.%m.%Y.xls")
-                if latest_date is None or file_date > latest_date:
-                    latest_date = file_date
-                    latest_file = os.path.join(root, file)
+                try:
+                    file_date = datetime.strptime(file, "%d.%m.%Y.xls")
+                    if latest_date is None or file_date > latest_date:
+                        latest_date = file_date
+                        latest_file = os.path.join(root, file)
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка при разборе даты файла {file}: {e}")
 
     if latest_file:
         destination_file = os.path.join(DATA_RAW, "last_users_from_cadr.xls")
         shutil.copy(latest_file, destination_file)
+        logger.info(f"✅ Скопирован файл: {latest_file}")
     else:
-        logger.info("Файлы не найдены.")
-    logger.info("Загрузка кадровых файлов завершена")
+        logger.warning("❌ Файлы не найдены.")
+
+    logger.info("📦 Загрузка кадровых файлов завершена")
 
 
 def login(driver, username, password, auth_url=None):
@@ -94,7 +99,7 @@ def login(driver, username, password, auth_url=None):
 def get_driver():
     driver_service = Service(executable_path=CHROMEDRIVER_PATH)
     options = webdriver.ChromeOptions()
-    # options.add_argument("--headless")
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
