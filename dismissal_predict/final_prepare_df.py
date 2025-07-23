@@ -75,6 +75,7 @@ LOGINS_TO_REMOVE = [
     "wf_jurist",
     "wf_sale",
     "wf_sale2",
+    "система",
 ]
 
 main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
@@ -198,6 +199,14 @@ class DataPreprocessor:
             df_transformed["уволен"] = uvolen_series.values
 
         return df_transformed
+
+
+def drop_trash_feature(df):
+    high_nan_cols = df.columns[df.isnull().mean() > 0.9].tolist()
+    if high_nan_cols:
+        print(f"Удалены признаки с >90% NaN: {high_nan_cols}")
+        df.drop(columns=high_nan_cols, inplace=True)
+    return df
 
 
 def merge_base(bases, index, merge_type):
@@ -334,7 +343,6 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users = merge_base([main_users, users_salary], "фио", "left")
         main_users = merge_base([main_users, grouped_children], "id", "left")
         main_users = merge_base([main_users, director], "id", "left")
-        # main_users["id_руководителя"] = main_users["id_руководителя"].fillna(-1).astype(int)
 
         main_users = main_users[~main_users["логин"].isin(LOGINS_TO_REMOVE)]
         main_users["пол"] = main_users["фио"].apply(determine_gender)
@@ -380,6 +388,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users["подчиненные"] = main_users["id"].apply(lambda x: sub_count.get(x, 0))
 
         main_users.to_csv(f"{DATA_PROCESSED}/main_all.csv", index=False)
+        main_users = drop_trash_feature(main_users)
 
         preprocessor = DataPreprocessor()
         main_users_for_train = preprocessor.fit(main_users)
@@ -411,6 +420,8 @@ def prepare_with_mic():
 
     main_top.to_csv(f"{DATA_PROCESSED}/main_top.csv", index=False)
 
+    main_top = drop_trash_feature(main_top)
+
     # 👉 Новый препроцессор только для main_top
     preprocessor_top = DataPreprocessor()
     main_top_for_train = preprocessor_top.fit(main_top)
@@ -418,6 +429,10 @@ def prepare_with_mic():
     if "уволен" in main_top.columns:
         main_top_for_train["уволен"] = main_top["уволен"].values
 
+    high_nan_cols = main_top_for_train.columns[main_top_for_train.isnull().mean() > 0.9].tolist()
+    if high_nan_cols:
+        print(f"Удалены признаки с >90% NaN: {high_nan_cols}")
+        main_top_for_train.drop(columns=high_nan_cols, inplace=True)
     main_top_for_train.to_csv(f"{DATA_PROCESSED}/main_top_for_train.csv", index=False)
 
     # 💾 Сохраним отдельный препроцессор
