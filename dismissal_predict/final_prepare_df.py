@@ -45,9 +45,36 @@ LOGINS_TO_REMOVE = [
     "root35",
     "root36",
     "test.testovich",
-    "система",
     "admin",
-    "двадцать тест",
+    "ib_tech",
+    "ib_tech2",
+    "lab.s10",
+    "lab.s12",
+    "lab.s13",
+    "lab.s3",
+    "lab.t20",
+    "test.ap",
+    "test_top",
+    "test7",
+    "testacc",
+    "testacc1",
+    "testacc12",
+    "testacc14",
+    "testacc16",
+    "testacc17",
+    "testacc18",
+    "testacc19",
+    "testacc2",
+    "testacc20",
+    "testacc21",
+    "testacc22",
+    "testacc3",
+    "testacc4",
+    "testacc5",
+    "testacc7",
+    "wf_jurist",
+    "wf_sale",
+    "wf_sale2",
 ]
 
 main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
@@ -307,6 +334,8 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users = merge_base([main_users, users_salary], "фио", "left")
         main_users = merge_base([main_users, grouped_children], "id", "left")
         main_users = merge_base([main_users, director], "id", "left")
+        # main_users["id_руководителя"] = main_users["id_руководителя"].fillna(-1).astype(int)
+
         main_users = main_users[~main_users["логин"].isin(LOGINS_TO_REMOVE)]
         main_users["пол"] = main_users["фио"].apply(determine_gender)
         main_users.replace("nan", pd.NA, inplace=True)
