@@ -1,12 +1,13 @@
+import codecs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 from datetime import datetime
+from difflib import get_close_matches
 import logging
 import os
 import shutil
 from threading import Lock
 import time
-import traceback
 
 from config import MAIN_CONFIGS, Config
 
@@ -245,7 +246,7 @@ def get_portal_director(auth_url: str):
                     df_old.at[idx, "фио_руководителя"] = new_dir_fio
             else:
                 # Новый сотрудник — добавляем полностью
-                df_old.loc[idx] = row
+                df_old.loc[idx] = row  # type: ignore
 
         df_old.reset_index(inplace=True)
         df_old.to_csv(output_path, index=False, sep=",")
@@ -268,12 +269,12 @@ def get_whisper_stat(base_dir, check_list_file, output_file):
     # Загружаем check_list
     check_list = set()
     if os.path.exists(check_list_file):
-        with open(check_list_file, "r", encoding="utf-8") as f:
-            check_list = set(line.strip() for line in f)
+        with codecs.open(check_list_file, "r", encoding="utf-8-sig") as f:
+            check_list = set(os.path.abspath(line.strip()) for line in f if line.strip())
 
-    # Получаем список файлов
+    # Получаем список всех .txt файлов
     all_files = {
-        os.path.join(root, file)
+        os.path.abspath(os.path.join(root, file))
         for root, _, files in os.walk(base_dir)
         for file in files
         if file.endswith(".txt")
@@ -284,23 +285,25 @@ def get_whisper_stat(base_dir, check_list_file, output_file):
     results = []
     new_check_entries = []
 
-    cpu_count = os.cpu_count() or 2
-    with ThreadPoolExecutor(max_workers=max(1, os.cpu_count() // 2)) as executor:  # type: ignore
+    max_workers = max(1, os.cpu_count() // 2)  # type: ignore
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_file, file): file for file in files_to_process}
 
         for future in tqdm(as_completed(futures), total=len(futures), desc="Обработка файлов"):
             file = futures[future]
+            abs_path = os.path.abspath(file)
             try:
                 result = future.result()
                 if result is not None:
-                    row, processed_file_path = result
+                    row, _ = result
                     results.append(row)
-                    new_check_entries.append(processed_file_path)
-            except Exception as e:
-                logger.error(f"Ошибка при обработке файла {file}: {e}")
-                logger.error(traceback.format_exc())
+            except Exception:
+                pass  # Ошибки молча игнорируем
+            finally:
+                new_check_entries.append(abs_path)
 
-    # Запись результата одним махом
+    # Запись результатов
     if results:
         file_exists = os.path.exists(output_file)
         write_header = not file_exists or os.path.getsize(output_file) == 0
@@ -311,13 +314,13 @@ def get_whisper_stat(base_dir, check_list_file, output_file):
                 writer.writeheader()
             writer.writerows(results)
 
-    # Обновляем check_list
+    # Запись новых путей в check_list
     if new_check_entries:
-        with open(check_list_file, "a", encoding="utf-8") as f:
+        with codecs.open(check_list_file, "a", encoding="utf-8-sig") as f:
             for path in new_check_entries:
                 f.write(path + "\n")
 
-    logger.info(f"Всего {len(all_files)} файлов. Обработано: {len(results)}.")
+    logger.info("Загрузка статистики топов завершена")
 
 
 def process_file(file_path):
