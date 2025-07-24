@@ -202,7 +202,7 @@ class DataPreprocessor:
 
 
 def drop_trash_feature(df):
-    high_nan_cols = df.columns[df.isnull().mean() > 0.99].tolist()
+    high_nan_cols = df.columns[df.isnull().mean() > 0.9].tolist()
     if high_nan_cols:
         print(f"Удалены признаки с большим % NaN: {high_nan_cols}")
         df.drop(columns=high_nan_cols, inplace=True)
@@ -399,8 +399,9 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users["подчиненные"] = main_users["id"].apply(lambda x: sub_count.get(x, 0))
 
         main_users.to_csv(f"{DATA_PROCESSED}/main_all.csv", index=False)
-        main_users = drop_trash_feature(main_users)
+
         main_users = drop_trash_rows(main_users)
+        main_users = drop_trash_feature(main_users)
 
         preprocessor = DataPreprocessor()
         main_users_for_train = preprocessor.fit(main_users)
@@ -432,8 +433,8 @@ def prepare_with_mic():
 
     main_top.to_csv(f"{DATA_PROCESSED}/main_top.csv", index=False)
 
-    main_top = drop_trash_feature(main_top)
     main_top = drop_trash_rows(main_top)
+    main_top = drop_trash_feature(main_top)
 
     # 👉 Новый препроцессор только для main_top
     preprocessor_top = DataPreprocessor()
