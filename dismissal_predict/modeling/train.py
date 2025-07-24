@@ -1,3 +1,4 @@
+from collections import Counter
 from datetime import datetime
 import logging
 import os
@@ -21,7 +22,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
 from tqdm import tqdm
 from xgboost import XGBClassifier
 
@@ -39,12 +40,15 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 # Константы
 TEST_SIZE = 0.2
 RANDOM_STATE = 20
-N_TRIALS = 10
+N_TRIALS = 100
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
 MLFLOW_EXPERIMENT_TOP = "xgboost_top_users"
-METRIC_TO_OPTIMIZE = "accuracy"
 
-target_col = "уволен"
+TARGET_COL = "уволен"
+
+COST_FP_NUM = 5
+COST_FN_NUM = 20
+
 
 warnings.filterwarnings("ignore")
 
@@ -83,7 +87,7 @@ def convert_all_to_float(df: pd.DataFrame, exclude_cols=None):
     return df
 
 
-def find_best_threshold(y_true, y_probs, cost_fp=1, cost_fn=9):
+def find_best_threshold(y_true, y_probs, cost_fp=COST_FP_NUM, cost_fn=COST_FN_NUM):
     thresholds = np.linspace(0, 1, 1000)
     best_score = -np.inf
     best_threshold = 0.5
@@ -105,14 +109,38 @@ def find_best_threshold(y_true, y_probs, cost_fp=1, cost_fn=9):
     return best_threshold
 
 
+def custom_cv_score(model, X, y, cost_fp=COST_FP_NUM, cost_fn=COST_FN_NUM, n_splits=5):
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
+    scores = []
+    threshold = []
+
+    for train_idx, valid_idx in skf.split(X, y):
+        X_train_fold, X_valid_fold = X.iloc[train_idx], X.iloc[valid_idx]
+        y_train_fold, y_valid_fold = y.iloc[train_idx], y.iloc[valid_idx]
+
+        model.fit(X_train_fold, y_train_fold)
+        y_probs = model.predict_proba(X_valid_fold)[:, 1]
+
+        # 👉 Находим лучший threshold по кастомному скорам
+        best_thresh = find_best_threshold(y_valid_fold, y_probs, cost_fp, cost_fn)
+        y_preds = (y_probs >= best_thresh).astype(int)
+
+        tn, fp, fn, tp = confusion_matrix(y_valid_fold, y_preds).ravel()
+        score = tp + tn - cost_fp * fp - cost_fn * fn
+        scores.append(score)
+        threshold.append(best_thresh)
+
+    return np.mean(scores), np.mean(threshold)
+
+
 def split_df(data):
     try:
         X_train, X_test, y_train, y_test = train_test_split(
-            data.drop([target_col], axis=1),
-            data[target_col],
+            data.drop([TARGET_COL], axis=1),
+            data[TARGET_COL],
             test_size=TEST_SIZE,
             random_state=RANDOM_STATE,
-            stratify=data[target_col],
+            stratify=data[TARGET_COL],
         )
         return X_train, X_test, y_train, y_test
     except Exception as e:
@@ -120,28 +148,32 @@ def split_df(data):
         raise
 
 
-def objective(trial, X_train, y_train, metric=METRIC_TO_OPTIMIZE):
+def objective(trial, X_train, y_train):
     try:
+        # 👉 вычисляем scale_pos_weight
+        counter = Counter(y_train)
+        scale_pos_weight = counter[0] / counter[1]
+
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 2, 100),
-            "max_depth": trial.suggest_int("max_depth", 2, 100),
-            "learning_rate": trial.suggest_float("learning_rate", 0.1, 0.5),
+            "n_estimators": trial.suggest_int("n_estimators", 10, 100),
+            "max_depth": trial.suggest_int("max_depth", 2, 10),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.5),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "scale_pos_weight": scale_pos_weight,
             "random_state": RANDOM_STATE,
             "use_label_encoder": False,
             "eval_metric": "logloss",
-            "class_weight": "balanced",  # Добавление class_weight
         }
 
         model = XGBClassifier(**params)
-        scores = cross_val_score(model, X_train, y_train, cv=5, scoring=metric)
-        mean_score = scores.mean()
-        logger.info(f"Trial {trial.number} finished with {metric}: {mean_score}")
-
-        return mean_score
+        score_mean, _ = custom_cv_score(
+            model, X_train, y_train, cost_fp=COST_FP_NUM, cost_fn=COST_FN_NUM
+        )
+        logger.info(f"Trial {trial.number} finished with custom score: {score_mean:.4f}")
+        return score_mean
     except Exception as e:
-        logger.info(f"Ошибка: {e}")
+        logger.exception(f"Ошибка в objective: {e}")
         raise
 
 
@@ -157,21 +189,24 @@ def run_optuna_experiment(
     current_time,
 ):
     try:
+        counter = Counter(y_train)
+        scale_pos_weight = counter[0] / counter[1]
         logger.info(f"Tracking URI: {mlflow.get_tracking_uri()}")
         logger.info(f"Experiment: {experiment_name}")
         mlflow.set_experiment(experiment_name)
 
         def optuna_objective(trial):
-            return objective(trial, X_train, y_train, metric=metric)
+            return objective(trial, X_train, y_train)
 
         study = optuna.create_study(study_name=experiment_name, direction="maximize")
         manual_optuna_progress(study, n_trials, optuna_objective)
 
         best_params = study.best_trial.params
-        best_mean_score = study.best_value  # Получаем лучшее значение mean_score
+        best_mean_score = study.best_value
 
         final_model = XGBClassifier(
             **best_params,
+            scale_pos_weight=scale_pos_weight,
             random_state=RANDOM_STATE,
             use_label_encoder=False,
             eval_metric="logloss",
@@ -182,7 +217,11 @@ def run_optuna_experiment(
         best_threshold = find_best_threshold(y_test, y_pred_proba)
         y_pred = (y_pred_proba >= best_threshold).astype(int)
 
+        tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+        custom_score = tp + tn - COST_FP_NUM * fp - COST_FN_NUM * fn
+
         final_metrics = {
+            "custom_score": custom_score,
             "accuracy": accuracy_score(y_test, y_pred),
             "precision": precision_score(y_test, y_pred),
             "recall": recall_score(y_test, y_pred),
@@ -229,8 +268,7 @@ def run_optuna_experiment(
             mlflow.log_param("n_trials", n_trials)
             mlflow.log_param("model_type", "XGBoostClassifier")
             mlflow.log_param("threshold", round(best_threshold, 4))
-            mlflow.log_param("optimized_metric", metric)
-            mlflow.log_metric(f"train_{metric}", round(best_mean_score, 3))  # Логируем mean_score
+            mlflow.log_metric(f"train_{metric}", round(best_mean_score, 3))
             mlflow.log_metrics(
                 {
                     **final_metrics,
@@ -284,13 +322,13 @@ def today():
 if __name__ == "__main__":
     mlflow.set_tracking_uri("file:///home/root6/python/dismissal_predict_v2/mlruns")
 
-    main_users = convert_all_to_float(main_users, exclude_cols=[target_col])
-    top_users = convert_all_to_float(top_users, exclude_cols=[target_col])
-    main_users[target_col] = (
-        pd.to_numeric(main_users[target_col], errors="coerce").fillna(0).astype(int)
+    main_users = convert_all_to_float(main_users, exclude_cols=[TARGET_COL])
+    top_users = convert_all_to_float(top_users, exclude_cols=[TARGET_COL])
+    main_users[TARGET_COL] = (
+        pd.to_numeric(main_users[TARGET_COL], errors="coerce").fillna(0).astype(int)
     )
-    top_users[target_col] = (
-        pd.to_numeric(top_users[target_col], errors="coerce").fillna(0).astype(int)
+    top_users[TARGET_COL] = (
+        pd.to_numeric(top_users[TARGET_COL], errors="coerce").fillna(0).astype(int)
     )
 
     main_users = main_users.drop_duplicates()
@@ -302,7 +340,7 @@ if __name__ == "__main__":
         y_train_main,
         X_test_main,
         y_test_main,
-        metric=METRIC_TO_OPTIMIZE,
+        metric="custom_score",
         n_trials=N_TRIALS,
         experiment_name=MLFLOW_EXPERIMENT_MAIN,
         model_output_path=f"{MODELS}/xgb_main_users.pkl",
@@ -315,7 +353,7 @@ if __name__ == "__main__":
         y_train_top,
         X_test_top,
         y_test_top,
-        metric=METRIC_TO_OPTIMIZE,
+        metric="custom_score",
         n_trials=N_TRIALS,
         experiment_name=MLFLOW_EXPERIMENT_TOP,
         model_output_path=f"{MODELS}/xgb_top_users.pkl",
