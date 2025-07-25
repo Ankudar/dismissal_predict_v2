@@ -99,53 +99,65 @@ class DataPreprocessor:
         self.numeric_cols = []
         self.preprocessor = None
 
-    def save(self, path_prefix):
-        joblib.dump(self.ordinal_encoder, f"{path_prefix}_ordinal_encoder.pkl")
-        joblib.dump(self.onehot_encoder, f"{path_prefix}_onehot_encoder.pkl")
-        joblib.dump(self.scaler, f"{path_prefix}_scaler.pkl")
-        joblib.dump(self.cat_cols, f"{path_prefix}_cat_cols.pkl")
-        joblib.dump(self.numeric_cols, f"{path_prefix}_numeric_cols.pkl")
-        joblib.dump(self.preprocessor, f"{path_prefix}_preprocessor.pkl")
+    def save(self, path: str):
+        joblib.dump(self, path)
 
-    def load(self, path_prefix):
-        self.ordinal_encoder = joblib.load(f"{path_prefix}_ordinal_encoder.pkl")
-        self.onehot_encoder = joblib.load(f"{path_prefix}_onehot_encoder.pkl")
-        self.scaler = joblib.load(f"{path_prefix}_scaler.pkl")
-        self.cat_cols = joblib.load(f"{path_prefix}_cat_cols.pkl")
-        self.numeric_cols = joblib.load(f"{path_prefix}_numeric_cols.pkl")
-        self.preprocessor = joblib.load(f"{path_prefix}_preprocessor.pkl")
+    @staticmethod
+    def load(path: str):
+        return joblib.load(path)
+
+    def drop_trash_feature(self, df, threshold=0.9):
+        high_nan_cols = df.columns[df.isnull().mean() > threshold].tolist()
+        if high_nan_cols:
+            print(f"Удалены признаки с большим % NaN: {high_nan_cols}")
+            df = df.drop(columns=high_nan_cols)
+        return df
+
+    # def drop_trash_rows(self, df, threshold=0.5):
+    #     row_nan_fraction = df.isnull().mean(axis=1)
+    #     bad_rows = df.index[row_nan_fraction > threshold]
+    #     if len(bad_rows) > 0:
+    #         print(
+    #             f"Удалены строки с более чем {int(threshold * 100)}% пропусков: {len(bad_rows)} шт."
+    #         )
+    #         df = df.drop(index=bad_rows)
+    #     return df
 
     def _handle_nans(self, df):
         for col in self.numeric_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce")
             df[col] = df[col].fillna(df[col].median())
-
-        # if "категория" in df.columns:
-        #     df["категория"] = df["категория"].fillna("other")
-
         return df
 
     def fit(self, df: pd.DataFrame):
         df = df.copy()
+
         df.drop(columns=[col for col in DROP_COLS if col in df.columns], inplace=True)
 
-        # Сохраняем столбец 'уволен' для последующего добавления
+        uvolen_series = df["уволен"] if "уволен" in df.columns else None
+
+        df = self.drop_trash_feature(df)
+        # df = self.drop_trash_rows(df)
+
+        if uvolen_series is not None:
+            uvolen_series = uvolen_series.loc[df.index]
+
+        # Удаляем "уволен" ПЕРЕД определением признаков!
         if "уволен" in df.columns:
-            uvolen_series = df["уволен"]
-            df.drop(columns=["уволен"], inplace=True)
+            df = df.drop(columns=["уволен"])
 
-        # Категориальные признаки
+        # Категориальные
         self.cat_cols = df.select_dtypes(include=["object"]).columns.tolist()
-        for col in self.cat_cols:
-            df[col] = df[col].astype(str).fillna("other")
+        # for col in self.cat_cols:
+        #     df[col] = df[col].astype(str).fillna("other")
 
-        # Числовые признаки
+        # Числовые
         self.numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+
         df = self._handle_nans(df)
 
-        # Разделение категориальных признаков на OneHot и Ordinal
-        onehot_cols = [col for col in self.cat_cols if df[col].nunique() <= 10]
-        ordinal_cols = [col for col in self.cat_cols if df[col].nunique() >= 11]
+        onehot_cols = [col for col in self.cat_cols if df[col].nunique() <= 15]
+        ordinal_cols = [col for col in self.cat_cols if df[col].nunique() >= 16]
 
         self.onehot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
         self.ordinal_encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
@@ -156,7 +168,7 @@ class DataPreprocessor:
                 ("ordinal", self.ordinal_encoder, ordinal_cols),
                 ("num", MinMaxScaler(), self.numeric_cols),
             ],
-            remainder="passthrough",
+            remainder="drop",
         )
 
         df_transformed = self.preprocessor.fit_transform(df)
@@ -164,60 +176,46 @@ class DataPreprocessor:
             df_transformed, columns=self.preprocessor.get_feature_names_out()  # type: ignore
         )
 
-        # Добавляем столбец 'уволен' обратно
-        if "уволен" in df.columns:
+        # Возвращаем 'уволен'
+        if uvolen_series is not None:
             df_transformed["уволен"] = uvolen_series.values
 
         return df_transformed
 
     def transform(self, df: pd.DataFrame):
         df = df.copy()
+
+        # Удаляем мусорные столбцы
         df.drop(columns=[col for col in DROP_COLS if col in df.columns], inplace=True)
 
-        # Сохраняем столбец 'уволен' для последующего добавления
+        # Сохраняем целевую переменную
+        uvolen_series = df["уволен"] if "уволен" in df.columns else None
+        if uvolen_series is not None:
+            uvolen_series = uvolen_series.loc[df.index]
+
+        # Удаляем "уволен" перед препроцессингом
         if "уволен" in df.columns:
-            uvolen_series = df["уволен"]
-            df.drop(columns=["уволен"], inplace=True)
+            df = df.drop(columns=["уволен"])
 
-        # Убедимся, что все необходимые категориальные колонки присутствуют
-        for col in self.cat_cols:
-            if col not in df.columns:
-                df[col] = "other"
-            df[col] = df[col].astype(str).fillna("other")
+        # Обработка категориальных
+        # for col in self.cat_cols:
+        #     if col not in df.columns:
+        #         df[col] = "other"
+        #     df[col] = df[col].astype(str).fillna("other")
 
-        # Обрабатываем числовые признаки
         df = self._handle_nans(df)
 
-        # Преобразуем категориальные признаки
+        # Применяем препроцессор
         df_transformed = self.preprocessor.transform(df)  # type: ignore
         df_transformed = pd.DataFrame(
             df_transformed, columns=self.preprocessor.get_feature_names_out()  # type: ignore
         )
 
-        # Добавляем столбец 'уволен' обратно
-        if "уволен" in df.columns:
+        # Возвращаем "уволен"
+        if uvolen_series is not None:
             df_transformed["уволен"] = uvolen_series.values
 
         return df_transformed
-
-
-def drop_trash_feature(df):
-    high_nan_cols = df.columns[df.isnull().mean() > 0.9].tolist()
-    if high_nan_cols:
-        print(f"Удалены признаки с большим % NaN: {high_nan_cols}")
-        df.drop(columns=high_nan_cols, inplace=True)
-    return df
-
-
-def drop_trash_rows(df, threshold=0.5):
-    row_nan_fraction = df.isnull().mean(axis=1)
-    bad_rows = df.index[row_nan_fraction > threshold]
-
-    if len(bad_rows) > 0:
-        print(f"Удалены строки с более чем {int(threshold * 100)}% пропусков: {len(bad_rows)} шт.")
-        df = df.drop(index=bad_rows)
-
-    return df
 
 
 def merge_base(bases, index, merge_type):
@@ -350,7 +348,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
             INPUT_HISTORY_CADR, index=False, sep=",", decimal=",", encoding="utf-8-sig"
         )
 
-        main_users = merge_base([main_users, users_cadr], "фио", "left")
+        main_users = merge_base([main_users, users_cadr], "фио", "right")
         main_users = merge_base([main_users, users_salary], "фио", "left")
         main_users = merge_base([main_users, grouped_children], "id", "left")
         main_users = merge_base([main_users, director], "id", "left")
@@ -384,15 +382,15 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
 
         main_users["стаж"] = np.maximum(main_users["стаж"], 0)
 
-        non_null_positions = main_users["текущая_должность_на_портале"].dropna().unique()
-        position_to_num = {position: idx + 1 for idx, position in enumerate(non_null_positions)}
-        main_users["текущая_должность_на_портале_num"] = main_users[
-            "текущая_должность_на_портале"
-        ].map(position_to_num)
+        # non_null_positions = main_users["текущая_должность_на_портале"].dropna().unique()
+        # position_to_num = {position: idx + 1 for idx, position in enumerate(non_null_positions)}
+        # main_users["текущая_должность_на_портале_num"] = main_users[
+        #     "текущая_должность_на_портале"
+        # ].map(position_to_num)
 
-        non_null_positions = main_users["отдел"].dropna().unique()
-        position_to_num = {position: idx + 1 for idx, position in enumerate(non_null_positions)}
-        main_users["отдел_num"] = main_users["отдел"].map(position_to_num)
+        # non_null_positions = main_users["отдел"].dropna().unique()
+        # position_to_num = {position: idx + 1 for idx, position in enumerate(non_null_positions)}
+        # main_users["отдел_num"] = main_users["отдел"].map(position_to_num)
 
         # Расчёт количества подчинённых для каждого id
         sub_count = main_users["id_руководителя"].value_counts()
@@ -400,14 +398,8 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
 
         main_users.to_csv(f"{DATA_PROCESSED}/main_all.csv", index=False)
 
-        main_users = drop_trash_rows(main_users)
-        main_users = drop_trash_feature(main_users)
-
         preprocessor = DataPreprocessor()
         main_users_for_train = preprocessor.fit(main_users)
-
-        if "уволен" in main_users.columns:
-            main_users_for_train["уволен"] = main_users["уволен"].values
 
         main_users_for_train.to_csv(f"{DATA_PROCESSED}/main_users_for_train.csv", index=False)
 
@@ -423,7 +415,8 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
 
 def prepare_with_mic():
     main_all = pd.read_csv(f"{DATA_PROCESSED}/main_all.csv", delimiter=",", decimal=",")
-    main_top = merge_base([stat, main_all], "логин", "left")
+    main_top = merge_base([stat, main_all], "логин", "right")
+    main_top = main_top[main_top["логин"].isin(stat["логин"])]
     main_top = main_top[~main_top["логин"].isin(LOGINS_TO_REMOVE)]
 
     for col in FLOAT_COLS:
@@ -433,20 +426,10 @@ def prepare_with_mic():
 
     main_top.to_csv(f"{DATA_PROCESSED}/main_top.csv", index=False)
 
-    main_top = drop_trash_rows(main_top)
-    main_top = drop_trash_feature(main_top)
-
     # 👉 Новый препроцессор только для main_top
     preprocessor_top = DataPreprocessor()
     main_top_for_train = preprocessor_top.fit(main_top)
 
-    if "уволен" in main_top.columns:
-        main_top_for_train["уволен"] = main_top["уволен"].values
-
-    high_nan_cols = main_top_for_train.columns[main_top_for_train.isnull().mean() > 0.9].tolist()
-    if high_nan_cols:
-        print(f"Удалены признаки с >90% NaN: {high_nan_cols}")
-        main_top_for_train.drop(columns=high_nan_cols, inplace=True)
     main_top_for_train.to_csv(f"{DATA_PROCESSED}/main_top_for_train.csv", index=False)
 
     # 💾 Сохраним отдельный препроцессор

@@ -36,16 +36,16 @@ os.makedirs(MODELS, exist_ok=True)
 INPUT_FILE_MAIN_USERS = f"{DATA_PROCESSED}/main_users_for_train.csv"
 INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
-TEST_SIZE = 0.25
-RANDOM_STATE = 10
-N_TRIALS = 500
+TEST_SIZE = 0.2
+RANDOM_STATE = 40
+N_TRIALS = 200
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
 MLFLOW_EXPERIMENT_TOP = "xgboost_top_users"
 
 TARGET_COL = "уволен"
 
-COST_FP_NUM = 2
-COST_FN_NUM = 20
+COST_FP_NUM = 5
+COST_FN_NUM = 60
 
 
 warnings.filterwarnings("ignore")
@@ -162,8 +162,8 @@ def objective(trial, X_train, y_train, threshold):
         scale_pos_weight = counter[0] / counter[1]
 
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 10, 200),
-            "max_depth": trial.suggest_int("max_depth", 2, 20),
+            "n_estimators": trial.suggest_int("n_estimators", 10, 400),
+            "max_depth": trial.suggest_int("max_depth", 2, 100),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.5),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),

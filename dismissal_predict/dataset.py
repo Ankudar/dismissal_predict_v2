@@ -228,6 +228,7 @@ def get_portal_director(auth_url: str):
 
         # Путь к сохранённому файлу
         output_path = os.path.join(DATA_RAW, "director.csv")
+        output_path_history = os.path.join(DATA_RAW, "director_history.csv")
 
         # Если файл уже существует, читаем старую таблицу
         if os.path.exists(output_path):
@@ -255,6 +256,7 @@ def get_portal_director(auth_url: str):
 
         df_old.reset_index(inplace=True)
         df_old.to_csv(output_path, index=False, sep=",")
+        df_old.to_csv(output_path_history, index=False, sep=",")
         logger.info(f"Обновлённые данные сохранены в {output_path}.")
 
     except Exception as e:

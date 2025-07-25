@@ -151,11 +151,8 @@ if __name__ == "__main__":
 
     try:
         # 🔹 Загружаем отдельные препроцессоры
-        preprocessor_main = DataPreprocessor()
-        preprocessor_main.load(PREPROCESSOR_MAIN_PATH)
-
-        preprocessor_top = DataPreprocessor()
-        preprocessor_top.load(PREPROCESSOR_TOP_PATH)
+        preprocessor_main = DataPreprocessor.load(PREPROCESSOR_MAIN_PATH)
+        preprocessor_top = DataPreprocessor.load(PREPROCESSOR_TOP_PATH)
 
         model_main, threshold_main, features_main = load_model_and_threshold(MODEL_MAIN)
         model_top, threshold_top, features_top = load_model_and_threshold(MODEL_TOP)

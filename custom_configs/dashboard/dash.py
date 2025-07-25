@@ -7,9 +7,13 @@ import plotly.express as px
 import seaborn as sns
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
+st_autorefresh(interval=3600000, limit=None, key="auto_refresh")
 st.set_page_config(layout="wide", page_title="Риски увольнений")
 st.title("Дашборд рисков увольнений сотрудников")
+
+info_file = Path("~/dismissal_predict_v2/data/processed/main_all.csv")
 
 
 def run_dashboard(excel_file: str, title: str):
@@ -85,6 +89,27 @@ def run_dashboard(excel_file: str, title: str):
         df["уволен"].isin(dismissed_values) & df["предсказание_увольнения"].isin(pred_values)
     ]
 
+    if info_file.exists():
+        df_info = pd.read_csv(info_file)
+
+        df_info["фио"] = df_info["фио"].astype(str).str.strip().str.lower()
+        filtered_df.loc[:, "фио"] = filtered_df["фио"].astype(str).str.strip().str.lower()
+
+        filtered_df = filtered_df.merge(df_info[["фио", "должность"]], how="left", on="фио")
+
+        # Удаление должностей
+        filtered_df = filtered_df[
+            ~filtered_df["должность"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin(["должность 1", "должность 2 и т.д."])
+        ]
+    else:
+        st.warning(
+            "Файл с должностями main_all.csv не найден. Фильтрация по должностям пропущена."
+        )
+
     if filtered_df.empty:
         st.info("Нет сотрудников, соответствующих фильтрам.")
         return
@@ -131,8 +156,6 @@ def run_dashboard(excel_file: str, title: str):
         prob_series = prob_series.sort_index()
         st.line_chart(prob_series)
 
-        info_file = Path("~/dismissal_predict_v2/data/processed/main_all.csv")
-
         if info_file.exists():
             info_df = pd.read_csv(info_file)
 
@@ -145,6 +168,8 @@ def run_dashboard(excel_file: str, title: str):
                 st.subheader("Информация о сотруднике:")
                 columns_to_show = [
                     "дата_увольнения",
+                    "id_руководителя",
+                    "подчиненные",
                     "должность",
                     "дата_рождения",
                     "дата_приема_в_1с",
@@ -162,10 +187,30 @@ def run_dashboard(excel_file: str, title: str):
                     "стаж",
                 ]
 
-                info_display = row_info[columns_to_show].iloc[0].to_frame().reset_index()
+                info_display = row_info[columns_to_show].iloc[0].copy()
+
+                manager_id = info_display["id_руководителя"]
+
+                if pd.isna(manager_id):
+                    manager_label = "nan"
+                elif manager_id == -1:
+                    manager_label = "-1 (nan)"
+                else:
+                    # Ищем фио руководителя по его id
+                    manager_fio = info_df.loc[info_df["id"] == manager_id, "фио"].values
+                    if len(manager_fio) > 0:
+                        manager_label = f"{manager_id} ({manager_fio[0].title()})"
+                    else:
+                        manager_label = str(manager_id)
+
+                # Заменяем id_руководителя на формат с ФИО
+                info_display["id_руководителя"] = manager_label
+
+                info_display = info_display.to_frame().reset_index()
                 info_display.columns = ["Показатель", "Значение"]
                 info_display["Значение"] = info_display["Значение"].astype(str)
                 st.table(info_display)
+
             else:
                 st.info("Информация о сотруднике не найдена в main_all.csv.")
         else:
