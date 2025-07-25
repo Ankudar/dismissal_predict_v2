@@ -72,6 +72,10 @@ LOGINS_TO_REMOVE = [
     "testacc4",
     "testacc5",
     "testacc7",
+    "testacc9",
+    "testacc10",
+    "testacc11",
+    "teacher.eng.11",
     "wf_jurist",
     "wf_sale",
     "wf_sale2",
@@ -396,6 +400,10 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         sub_count = main_users["id_руководителя"].value_counts()
         main_users["подчиненные"] = main_users["id"].apply(lambda x: sub_count.get(x, 0))
 
+        main_users["id_руководителя"] = main_users["id_руководителя"].fillna(-1).astype(int)
+        main_users["avg_child_age"] = main_users["avg_child_age"].fillna(0).astype(float)
+        main_users["ср_зп"] = main_users["ср_зп"].fillna(0).astype(float)
+
         main_users.to_csv(f"{DATA_PROCESSED}/main_all.csv", index=False)
 
         preprocessor = DataPreprocessor()
@@ -418,6 +426,10 @@ def prepare_with_mic():
     main_top = merge_base([stat, main_all], "логин", "right")
     main_top = main_top[main_top["логин"].isin(stat["логин"])]
     main_top = main_top[~main_top["логин"].isin(LOGINS_TO_REMOVE)]
+
+    main_top["id_руководителя"] = main_top["id_руководителя"].fillna(-1).astype(int)
+    main_top["avg_child_age"] = main_top["avg_child_age"].fillna(0).astype(float)
+    main_top["ср_зп"] = main_top["ср_зп"].fillna(0).astype(float)
 
     for col in FLOAT_COLS:
         if col in main_top.columns:

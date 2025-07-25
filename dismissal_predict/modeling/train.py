@@ -38,14 +38,15 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 200
+N_TRIALS = 1000
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
 MLFLOW_EXPERIMENT_TOP = "xgboost_top_users"
 
 TARGET_COL = "уволен"
 
 COST_FP_NUM = 5
-COST_FN_NUM = 60
+COST_FN_NUM = 10
+N_SPLITS = 5
 
 
 warnings.filterwarnings("ignore")
@@ -106,7 +107,9 @@ def find_best_threshold(y_true, y_probs, cost_fp=COST_FP_NUM, cost_fn=COST_FN_NU
     return best_threshold
 
 
-def cross_val_best_threshold(model, X, y, cost_fp=COST_FP_NUM, cost_fn=COST_FN_NUM, n_splits=5):
+def cross_val_best_threshold(
+    model, X, y, cost_fp=COST_FP_NUM, cost_fn=COST_FN_NUM, n_splits=N_SPLITS
+):
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
     thresholds = []
 
@@ -122,7 +125,9 @@ def cross_val_best_threshold(model, X, y, cost_fp=COST_FP_NUM, cost_fn=COST_FN_N
     return np.mean(thresholds)
 
 
-def custom_cv_score(model, X, y, threshold, cost_fp=COST_FP_NUM, cost_fn=COST_FN_NUM, n_splits=3):
+def custom_cv_score(
+    model, X, y, threshold, cost_fp=COST_FP_NUM, cost_fn=COST_FN_NUM, n_splits=N_SPLITS
+):
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
     scores = []
 
@@ -134,7 +139,8 @@ def custom_cv_score(model, X, y, threshold, cost_fp=COST_FP_NUM, cost_fn=COST_FN
         y_probs = model.predict_proba(X_valid_fold)[:, 1]
 
         y_preds = (y_probs >= threshold).astype(int)
-        tn, fp, fn, tp = confusion_matrix(y_valid_fold, y_preds).ravel()
+        cm = confusion_matrix(y_valid_fold, y_preds, labels=[0, 1])
+        tn, fp, fn, tp = cm.ravel()
         score = tp + tn - cost_fp * fp - cost_fn * fn
         scores.append(score)
 
@@ -162,11 +168,11 @@ def objective(trial, X_train, y_train, threshold):
         scale_pos_weight = counter[0] / counter[1]
 
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 10, 400),
-            "max_depth": trial.suggest_int("max_depth", 2, 100),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.5),
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "n_estimators": trial.suggest_int("n_estimators", 10, 500),
+            "max_depth": trial.suggest_int("max_depth", 2, 300),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.7),
+            "subsample": trial.suggest_float("subsample", 0.2, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.2, 1.0),
             "scale_pos_weight": scale_pos_weight,
             "random_state": RANDOM_STATE,
             "eval_metric": "logloss",
