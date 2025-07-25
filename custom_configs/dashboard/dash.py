@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import plotly.express as px
 import seaborn as sns
+import shap
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
@@ -92,9 +93,11 @@ def run_dashboard(excel_file: str, title: str):
     if info_file.exists():
         df_info = pd.read_csv(info_file)
 
+        # Приведение ФИО к нижнему регистру и очистка пробелов
         df_info["фио"] = df_info["фио"].astype(str).str.strip().str.lower()
         filtered_df.loc[:, "фио"] = filtered_df["фио"].astype(str).str.strip().str.lower()
 
+        # Мерж по ФИО
         filtered_df = filtered_df.merge(df_info[["фио", "должность"]], how="left", on="фио")
 
         # Удаление должностей
@@ -103,7 +106,7 @@ def run_dashboard(excel_file: str, title: str):
             .astype(str)
             .str.strip()
             .str.lower()
-            .isin(["должность 1", "должность 2 и т.д."])
+            .isin(["должность 1", "должность 2"])
         ]
     else:
         st.warning(
@@ -187,8 +190,10 @@ def run_dashboard(excel_file: str, title: str):
                     "стаж",
                 ]
 
+                # Копируем значения строки
                 info_display = row_info[columns_to_show].iloc[0].copy()
 
+                # Обрабатываем id_руководителя
                 manager_id = info_display["id_руководителя"]
 
                 if pd.isna(manager_id):
@@ -206,6 +211,7 @@ def run_dashboard(excel_file: str, title: str):
                 # Заменяем id_руководителя на формат с ФИО
                 info_display["id_руководителя"] = manager_label
 
+                # Финальный вывод
                 info_display = info_display.to_frame().reset_index()
                 info_display.columns = ["Показатель", "Значение"]
                 info_display["Значение"] = info_display["Значение"].astype(str)
@@ -256,8 +262,102 @@ def run_dashboard(excel_file: str, title: str):
             st.info("Файл с SHAP-факторами не найден.")
 
 
+def run_dashboard_summary(path_all, path_top, shap_path_all, shap_path_top):
+    # Загрузка данных
+    df_all = pd.read_excel(path_all)
+    df_top = pd.read_excel(path_top)
+
+    # Подготовка столбцов и нормализация
+    for df in [df_all, df_top]:
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        df["фио"] = df["фио"].astype(str).str.strip().str.lower()
+
+    # Определение последней даты
+    date_cols = [col for col in df_all.columns if col.count(".") == 2 and col[:2].isdigit()]
+    sorted_date_cols = sorted(date_cols, key=lambda d: pd.to_datetime(d, dayfirst=True))
+    latest_date = sorted_date_cols[-1]
+
+    # Объединение с усреднением
+    df_combined = pd.concat([df_all[["фио", latest_date]], df_top[["фио", latest_date]]])
+    df_combined = df_combined.groupby("фио", as_index=False).mean()
+
+    # Гистограмма
+    fig = px.histogram(
+        df_combined, x=latest_date, nbins=50, title="Распределение рисков увольнения"
+    )
+    fig.update_layout(xaxis_title="Риск увольнения", yaxis_title="Количество сотрудников")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # SHAP-факторы
+    st.subheader("Анализ факторов риска (SHAP)")
+    if shap_path_all.exists() and shap_path_top.exists():
+        shap_all = pd.read_csv(shap_path_all)
+        shap_top = pd.read_csv(shap_path_top)
+
+        shap_all.drop(columns=["фио"], inplace=True, errors="ignore")
+        shap_top.drop(columns=["фио"], inplace=True, errors="ignore")
+
+        shap_combined = pd.concat([shap_all, shap_top])
+
+        # Вычисление средних значений
+        mean_positive = (
+            shap_combined[shap_combined > 0].mean().dropna().sort_values(ascending=False).head(10)
+        )
+        mean_negative = shap_combined[shap_combined < 0].mean().dropna().sort_values().head(10)
+        mean_abs = shap_combined.abs().mean().sort_values(ascending=False).head(10)
+
+        # Формирование графиков
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.markdown("**ТОП-10 факторов на увольнение (SHAP > 0)**")
+            fig1 = px.bar(
+                mean_positive.reset_index(),
+                x="index",
+                y=0,
+                labels={"index": "Фактор", "0": "SHAP значение"},
+                title=None,
+            )
+            fig1.update_layout(xaxis={"categoryorder": "total descending"})
+            st.plotly_chart(fig1, use_container_width=True)
+
+        with col2:
+            st.markdown("**ТОП-10 факторов на неувольнение (SHAP < 0)**")
+            fig2 = px.bar(
+                mean_negative.reset_index(),
+                x="index",
+                y=0,
+                labels={"index": "Фактор", "0": "SHAP значение"},
+                title=None,
+            )
+            fig2.update_layout(xaxis={"categoryorder": "total descending"})
+            st.plotly_chart(fig2, use_container_width=True)
+
+        with col3:
+            st.markdown("**Ключевые факторы риска (по SHAP)**")
+
+            # Отбираем топ-10 признаков по убыванию важности
+            top_features = (
+                shap_combined.abs().mean().sort_values(ascending=False).head(10).index.tolist()
+            )
+            shap_sample = shap_combined[top_features]
+
+            # Строим SHAP-график (dot plot), отсортированный по убыванию важности
+            fig_summary, ax = plt.subplots(figsize=(8, 6))
+            shap.summary_plot(
+                shap_sample.values,
+                features=shap_sample,
+                feature_names=top_features,
+                plot_type="dot",
+                show=False,
+            )
+            st.pyplot(fig_summary)
+    else:
+        st.warning("Файлы SHAP-факторов не найдены.")
+
+
 # Вкладки
-tab1, tab2 = st.tabs(["Все сотрудники", "Другие сотрудники"])
+tab1, tab2, tab3 = st.tabs(["Все сотрудники", "Другие сотрудники", "По всей компании"])
 
 with tab1:
     run_dashboard(
@@ -269,4 +369,12 @@ with tab2:
     run_dashboard(
         "~/dismissal_predict_v2/data/results/result_top.xlsx",
         title="top",
+    )
+
+with tab3:
+    run_dashboard_summary(
+        Path("~/dismissal_predict_v2/data/results/result_all.xlsx"),
+        Path("~/dismissal_predict_v2/data/results/result_top.xlsx"),
+        Path("~/dismissal_predict_v2/data/results/result_all_shap.csv"),
+        Path("~/dismissal_predict_v2/data/results/result_top_shap.csv"),
     )

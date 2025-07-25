@@ -38,7 +38,7 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 1000
+N_TRIALS = 2
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
 MLFLOW_EXPERIMENT_TOP = "xgboost_top_users"
 
