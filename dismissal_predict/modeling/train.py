@@ -1,5 +1,6 @@
 from collections import Counter
 from datetime import datetime
+from itertools import product
 import logging
 import os
 import warnings
@@ -38,14 +39,14 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 2
+N_TRIALS = 1000
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
 MLFLOW_EXPERIMENT_TOP = "xgboost_top_users"
 
 TARGET_COL = "уволен"
 
-COST_FP_NUM = 5
-COST_FN_NUM = 10
+COST_FP_NUM = 1
+COST_FN_NUM = 20
 N_SPLITS = 5
 
 
@@ -53,6 +54,40 @@ warnings.filterwarnings("ignore")
 
 main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
+
+
+def experiment_cost_matrix(X, y):
+    cost_fp_values = list(range(1, 21, 2))
+    cost_fn_values = list(range(20, 201, 20))
+
+    results = []
+
+    for cost_fp, cost_fn in product(cost_fp_values, cost_fn_values):
+        logger.info(f"Пробуем cost_fp={cost_fp}, cost_fn={cost_fn}")
+
+        model = XGBClassifier(
+            scale_pos_weight=Counter(y)[0] / Counter(y)[1],
+            random_state=RANDOM_STATE,
+            eval_metric="logloss",
+            use_label_encoder=False,
+        )
+
+        threshold = cross_val_best_threshold(model, X, y, cost_fp, cost_fn)
+        score = custom_cv_score(model, X, y, threshold, cost_fp, cost_fn)
+
+        results.append(
+            {
+                "cost_fp": cost_fp,
+                "cost_fn": cost_fn,
+                "threshold": round(threshold, 4),
+                "custom_score": round(score, 3),
+            }
+        )
+
+    df = pd.DataFrame(results).sort_values("custom_score", ascending=False)
+    print("\n🔍 Результаты перебора cost_fp и cost_fn:")
+    print(df.to_string(index=False))
+    return df
 
 
 def is_new_model_better(new_metrics, old_metrics, metric):
@@ -355,6 +390,11 @@ if __name__ == "__main__":
         current_time=today(),
     )
 
+    # чтобы провести эксперименты по подбору штрафов - вначале надо закомментить run_optuna_experiment,
+    # а после уже выставить лучшие показатели, расскомментить обучение и закомментить эксперимент
+    # df_cost_matrix_results = experiment_cost_matrix(X_train_main, y_train_main)
+    # оказалось все логично - минимальные значения = лучшие показатели
+
     X_train_top, X_test_top, y_train_top, y_test_top = split_df(top_users)
     run_optuna_experiment(
         X_train_top,
@@ -367,3 +407,8 @@ if __name__ == "__main__":
         model_output_path=f"{MODELS}/xgb_top_users.pkl",
         current_time=today(),
     )
+
+    # df_cost_matrix_results = experiment_cost_matrix(X_train_top, y_train_top)
+    # df_cost_matrix_results.to_csv(
+    #     "{DATA_PROCESSED}/cost_matrix_experiment_results.csv", index=False
+    # )
