@@ -39,13 +39,13 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 1000
+N_TRIALS = 2
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
 MLFLOW_EXPERIMENT_TOP = "xgboost_top_users"
 
 TARGET_COL = "уволен"
 
-COST_FP_NUM = 1
+COST_FP_NUM = 2
 COST_FN_NUM = 20
 N_SPLITS = 5
 
@@ -133,7 +133,9 @@ def find_best_threshold(y_true, y_probs, cost_fp=COST_FP_NUM, cost_fn=COST_FN_NU
             continue
 
         tn, fp, fn, tp = cm.ravel()
-        score = tp + tn - cost_fp * fp - cost_fn * fn
+        score = (tp + tn - cost_fp * fp - cost_fn * fn) / (
+            tp + tn + cost_fp * fp + cost_fn * fn + 1e-9
+        )
 
         if score > best_score:
             best_score = score
@@ -176,7 +178,9 @@ def custom_cv_score(
         y_preds = (y_probs >= threshold).astype(int)
         cm = confusion_matrix(y_valid_fold, y_preds, labels=[0, 1])
         tn, fp, fn, tp = cm.ravel()
-        score = tp + tn - cost_fp * fp - cost_fn * fn
+        score = (tp + tn - cost_fp * fp - cost_fn * fn) / (
+            tp + tn + cost_fp * fp + cost_fn * fn + 1e-9
+        )
         scores.append(score)
 
     return np.mean(scores)
@@ -270,10 +274,12 @@ def run_optuna_experiment(
 
         y_pred = (y_pred_proba >= global_threshold).astype(int)
         tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
-        custom_score = tp + tn - COST_FP_NUM * fp - COST_FN_NUM * fn
+        custom_score = (tp + tn - COST_FP_NUM * fp - COST_FN_NUM * fn) / (
+            tp + tn + COST_FP_NUM * fp + COST_FN_NUM * fn + 1e-9
+        )
 
         final_metrics = {
-            "custom_score": custom_score,
+            "custom_score": round(custom_score, 3),
             "accuracy": accuracy_score(y_test, y_pred),
             "precision": precision_score(y_test, y_pred),
             "recall": recall_score(y_test, y_pred),
@@ -410,5 +416,5 @@ if __name__ == "__main__":
 
     # df_cost_matrix_results = experiment_cost_matrix(X_train_top, y_train_top)
     # df_cost_matrix_results.to_csv(
-    #     "{DATA_PROCESSED}/cost_matrix_experiment_results.csv", index=False
+    #     f"{DATA_PROCESSED}/cost_matrix_experiment_results.csv", index=False
     # )

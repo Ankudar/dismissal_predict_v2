@@ -3,11 +3,18 @@ import logging
 import re
 
 import joblib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from rusgenderdetection import get_gender  # type: ignore
+import seaborn as sns
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, OrdinalEncoder
+from sklearn.preprocessing import (
+    MinMaxScaler,
+    OneHotEncoder,
+    OrdinalEncoder,
+    RobustScaler,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,6 +43,7 @@ DROP_COLS = [
     "отдел",
     "уровень_зп",
     "грейд",
+    "id_руководителя",
 ]
 
 FLOAT_COLS = ["тон", "увольнение", "оффер", "вредительство", "личная жизнь", "стресс", "конфликты"]
@@ -170,7 +178,7 @@ class DataPreprocessor:
             transformers=[
                 ("onehot", self.onehot_encoder, onehot_cols),
                 ("ordinal", self.ordinal_encoder, ordinal_cols),
-                ("num", MinMaxScaler(), self.numeric_cols),
+                ("num", RobustScaler(), self.numeric_cols),
             ],
             remainder="drop",
         )
