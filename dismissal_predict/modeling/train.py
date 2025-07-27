@@ -46,7 +46,7 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 50  # иттерации для оптуны
+N_TRIALS = 200  # иттерации для оптуны
 N_SPLITS = 5  # число кроссвалидаций
 METRIC = "f1"
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
