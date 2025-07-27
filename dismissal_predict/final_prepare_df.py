@@ -335,6 +335,8 @@ def determine_gender(full_name):
 def main_prepare_for_all(main_users, users_salary, users_cadr, children):
     try:
         today = pd.to_datetime(datetime.now().date())
+
+        # --- Обработка детей ---
         children["date_birth"] = pd.to_datetime(
             children["date_birth"], format="%d.%m.%Y", errors="coerce"
         )
@@ -343,18 +345,19 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         grouped_children = (
             children.groupby("id")
             .agg(
-                child_num=("name", "count"),
-                avg_child_age=("age", "mean"),
-                main_child_gender=("gender", mode_with_tie),
+                число_детей=("name", "count"),
+                средний_возраст_детей=("age", "mean"),
+                средний_пол_детей=("gender", mode_with_tie),
             )
             .reset_index()
         )
 
+        # --- Приведение ФИО ---
         for df in [users_salary, users_cadr]:
             df["фио"] = df["фио"].str.split().str[:2].str.join(" ")
-
         main_users["фио"] = main_users["фамилия"] + " " + main_users["имя"]
 
+        # --- Объединение с историей ---
         users_cadr = merge_fillna(users_cadr, history_cadr, on="фио")
         users_cadr.to_csv(
             INPUT_HISTORY_CADR, index=False, sep=",", decimal=",", encoding="utf-8-sig"
@@ -365,6 +368,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users = merge_base([main_users, grouped_children], "id", "left")
         main_users = merge_base([main_users, director], "id", "left")
 
+        # --- Очистка ---
         main_users = main_users[~main_users["логин"].isin(LOGINS_TO_REMOVE)]
         main_users["пол"] = main_users["фио"].apply(determine_gender)
         main_users.replace("nan", pd.NA, inplace=True)
@@ -380,50 +384,76 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
             main_users["дата_увольнения"], errors="coerce"
         )
 
+        # --- Возраст и стаж ---
         main_users["возраст"] = np.where(
             main_users["дата_рождения"].notna(),
-            (today - main_users["дата_рождения"]).dt.days // 365,  # type: ignore
+            (today - main_users["дата_рождения"]).dt.days // 365,
             np.nan,
         )
 
         main_users["стаж"] = np.where(
             main_users["дата_увольнения"].notna(),
             (main_users["дата_увольнения"] - main_users["дата_приема_в_1с"]).dt.days / 365,
-            (today - main_users["дата_приема_в_1с"]).dt.days / 365,  # type: ignore
+            (today - main_users["дата_приема_в_1с"]).dt.days / 365,
         )
-
         main_users["стаж"] = np.maximum(main_users["стаж"], 0)
 
-        # non_null_positions = main_users["текущая_должность_на_портале"].dropna().unique()
-        # position_to_num = {position: idx + 1 for idx, position in enumerate(non_null_positions)}
-        # main_users["текущая_должность_на_портале_num"] = main_users[
-        #     "текущая_должность_на_портале"
-        # ].map(position_to_num)
-
-        # non_null_positions = main_users["отдел"].dropna().unique()
-        # position_to_num = {position: idx + 1 for idx, position in enumerate(non_null_positions)}
-        # main_users["отдел_num"] = main_users["отдел"].map(position_to_num)
-
-        # Расчёт количества подчинённых для каждого id
+        # --- Кол-во подчинённых ---
         sub_count = main_users["id_руководителя"].value_counts()
         main_users["подчиненные"] = main_users["id"].apply(lambda x: sub_count.get(x, 0))
 
+        # --- Преобразования ---
         main_users["id_руководителя"] = main_users["id_руководителя"].fillna(-1).astype(int)
-        main_users["avg_child_age"] = main_users["avg_child_age"].fillna(0).astype(float)
+        main_users["средний_возраст_детей"] = (
+            main_users["средний_возраст_детей"].fillna(0).astype(float)
+        )
         main_users["ср_зп"] = main_users["ср_зп"].fillna(0).astype(float)
 
+        # --- Новые признаки ---
+        main_users["скоро_др"] = (
+            (main_users["дата_рождения"].dt.month == today.month)
+            & (abs(main_users["дата_рождения"].dt.day - today.day) <= 30)
+        ).astype(int)
+
+        main_users["скоро_годовщика_приема"] = (
+            (main_users["дата_приема_в_1с"].dt.month == today.month)
+            & (abs(main_users["дата_приема_в_1с"].dt.day - today.day) <= 30)
+        ).astype(int)
+
+        main_users["есть_маленькие_дети"] = (
+            (main_users["средний_возраст_детей"] <= 5) & (main_users["число_детей"] > 0)
+        ).astype(int)
+
+        main_users["индес_ответственности_за_детьми"] = main_users["число_детей"].fillna(0) * (
+            18 - main_users["средний_возраст_детей"].fillna(0)
+        )
+
+        mean_salary = main_users["ср_зп"].replace(0, np.nan).mean()
+        main_users["зп_на_ср_зп_по_компании"] = main_users["ср_зп"] / mean_salary
+        main_users["не_доплачивают"] = (main_users["зп_на_ср_зп_по_компании"] < 0.8).astype(int)
+
+        main_users["стаж_на_возраст"] = main_users["стаж"] / main_users["возраст"]
+        main_users["зп_на_число_детей"] = main_users["ср_зп"] / main_users["число_детей"].replace(
+            0, np.nan
+        )
+        main_users["недоплата_и_больше_2_детей"] = (
+            (main_users["не_доплачивают"] == 1) & (main_users["число_детей"] >= 2)
+        ).astype(int)
+
+        # --- Сохранение ---
         main_users.to_csv(f"{DATA_PROCESSED}/main_all.csv", index=False)
 
         preprocessor = DataPreprocessor()
         main_users_for_train = preprocessor.fit(main_users)
 
         main_users_for_train.to_csv(f"{DATA_PROCESSED}/main_users_for_train.csv", index=False)
-
         preprocessor.save(f"{DATA_PROCESSED}/preprocessor")
+
         print(
             "NaNs in main_users_for_train:\n",
             main_users_for_train.isnull().sum()[main_users_for_train.isnull().any()],
         )
+
     except Exception as e:
         logger.info(f"Ошибка: {e}")
         raise
@@ -436,7 +466,7 @@ def prepare_with_mic():
     main_top = main_top[~main_top["логин"].isin(LOGINS_TO_REMOVE)]
 
     main_top["id_руководителя"] = main_top["id_руководителя"].fillna(-1).astype(int)
-    main_top["avg_child_age"] = main_top["avg_child_age"].fillna(0).astype(float)
+    main_top["средний_возраст_детей"] = main_top["средний_возраст_детей"].fillna(0).astype(float)
     main_top["ср_зп"] = main_top["ср_зп"].fillna(0).astype(float)
 
     for col in FLOAT_COLS:
