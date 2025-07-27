@@ -178,9 +178,6 @@ def get_portal_children(auth_url):
 
         df = pd.DataFrame(data)
 
-        # Проверяем наличие данных в столбцах 'NAME' и 'DATE_BIRTH'
-        df = df.dropna(subset=["NAME", "DATE_BIRTH"])
-
         df.to_csv(os.path.join(DATA_RAW, "children.csv"), index=False, header=False, sep=",")
         logger.info(f"Данные сохранены в {DATA_RAW}/children.csv.")
 
@@ -392,16 +389,16 @@ def get_1c_zup(base_name, server_1c, login, password):
 
 
 def run_all():
-    # get_latest_file(cadr_users_list_url)
-    # get_portal_users(portal_users_link)
+    get_latest_file(cadr_users_list_url)
+    get_portal_users(portal_users_link)
     get_portal_children(portal_children_link)
-    # get_portal_director(portal_director_link)
-    # get_whisper_stat(
-    #     base_dir=whisper_data,
-    #     check_list_file=os.path.join(DATA_RAW, "check_list.txt"),
-    #     output_file=os.path.join(DATA_RAW, "whisper_stat.csv"),
-    # )
-    # get_1c_zup(Ref_zup, Srvr_zup, login_1c, password_1c)
+    get_portal_director(portal_director_link)
+    get_whisper_stat(
+        base_dir=whisper_data,
+        check_list_file=os.path.join(DATA_RAW, "check_list.txt"),
+        output_file=os.path.join(DATA_RAW, "whisper_stat.csv"),
+    )
+    get_1c_zup(Ref_zup, Srvr_zup, login_1c, password_1c)
     # pass
 
 

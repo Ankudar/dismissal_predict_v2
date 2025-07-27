@@ -102,6 +102,8 @@ def process_last_users_from_cadr(input_file, output_dir):
 def process_children(input_file, output_dir):
     try:
         df = pd.read_csv(input_file, header=0)
+        df = df[df["NAME"].str.len() >= 10]
+
         columns_to_copy = ["USER_ID", "NAME", "DATE_BIRTH", "GENDER"]
 
         df.columns = df.columns.str.strip()
