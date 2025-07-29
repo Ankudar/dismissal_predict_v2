@@ -414,7 +414,8 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         ).astype(int)
 
         main_users["есть_маленькие_дети"] = (
-            (main_users["средний_возраст_детей"] <= 5) & (main_users["число_детей"] > 0)
+            main_users["id"].map(children.groupby("id")["age"].min()).le(5)
+            & (main_users["число_детей"] > 0)
         ).astype(int)
 
         main_users["индес_ответственности_за_детьми"] = main_users["число_детей"].fillna(0) * (
