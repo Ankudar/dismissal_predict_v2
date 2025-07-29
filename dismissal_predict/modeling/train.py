@@ -61,21 +61,32 @@ main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
-def is_new_model_better(new_metrics, old_metrics):
-    new_recall = new_metrics.get("recall", 0)
-    new_precision = new_metrics.get("precision", 0)
-    old_recall = old_metrics.get("recall", 0)
-    old_precision = old_metrics.get("precision", 0)
+def is_new_model_better(new_metrics, old_metrics, delta=0.001):
+    def round3(x):
+        return round(x or 0, 3)
 
-    # Если новая модель имеет заметно лучший recall (с запасом), это важно
-    if new_recall > old_recall + 0.001:
+    new_f1 = round3(new_metrics.get("f1"))
+    old_f1 = round3(old_metrics.get("f1"))
+
+    if new_f1 > old_f1:
         return True
+    if new_f1 < old_f1:
+        return False
 
-    # Если recall практически одинаков, но precision выше — сохраняем
-    if abs(new_recall - old_recall) < 0.001 and new_precision > old_precision + 0.001:
+    # f1 равны — сравниваем recall
+    new_recall = round3(new_metrics.get("recall"))
+    old_recall = round3(old_metrics.get("recall"))
+
+    if new_recall > old_recall:
         return True
+    if new_recall < old_recall:
+        return False
 
-    return False
+    # recall равны — сравниваем precision
+    new_precision = round3(new_metrics.get("precision"))
+    old_precision = round3(old_metrics.get("precision"))
+
+    return new_precision > old_precision
 
 
 def manual_optuna_progress(study, n_trials, func):
