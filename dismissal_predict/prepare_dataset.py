@@ -71,6 +71,7 @@ def drop_duplicated(data):
 def process_last_users_from_cadr(input_file, output_dir):
     try:
         df = pd.read_excel(input_file, header=2)
+        df = df[df["планируемая дата выхода из декрета"].isna()]
         columns_to_copy = [
             "дата приема в 1С",
             "Ф.И.О.",

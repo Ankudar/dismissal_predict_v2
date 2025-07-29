@@ -1,6 +1,5 @@
 from collections import Counter
 from datetime import datetime
-from itertools import product
 import logging
 import os
 import warnings
@@ -47,8 +46,9 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
 N_TRIALS = 200  # иттерации для оптуны
-N_SPLITS = 5  # число кроссвалидаций
+N_SPLITS = 10  # число кроссвалидаций
 METRIC = "f1"
+EVAL_METRIC = "logloss"
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
 MLFLOW_EXPERIMENT_TOP = "xgboost_top_users"
 
@@ -61,8 +61,21 @@ main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
-def is_new_model_better(new_metrics, old_metrics, metric):
-    return new_metrics[metric] > old_metrics.get(metric, 0)
+def is_new_model_better(new_metrics, old_metrics):
+    new_recall = new_metrics.get("recall", 0)
+    new_precision = new_metrics.get("precision", 0)
+    old_recall = old_metrics.get("recall", 0)
+    old_precision = old_metrics.get("precision", 0)
+
+    # Если новая модель имеет заметно лучший recall (с запасом), это важно
+    if new_recall > old_recall + 0.001:
+        return True
+
+    # Если recall практически одинаков, но precision выше — сохраняем
+    if abs(new_recall - old_recall) < 0.001 and new_precision > old_precision + 0.001:
+        return True
+
+    return False
 
 
 def manual_optuna_progress(study, n_trials, func):
@@ -92,12 +105,21 @@ def convert_all_to_float(df: pd.DataFrame, exclude_cols=None):
 
 
 def cross_val_best_threshold(
-    model, X, y, thresholds=np.arange(0.1, 1.0, 0.01), n_splits=N_SPLITS, plot=True
+    model,
+    X,
+    y,
+    thresholds=np.arange(0.01, 0.9, 0.01),
+    metric=METRIC,
+    n_splits=N_SPLITS,
+    random_state=RANDOM_STATE,
 ):
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
-    all_scores = []
+    print(f"Поиск threshold по метрике {metric.upper()} с минимальными FN + FP...\n")
 
-    print("Поиск оптимального threshold по фолдам...\n")
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    thresholds_found = []
+    metrics = []
+    fn_list = []
+    fp_list = []
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
@@ -106,44 +128,55 @@ def cross_val_best_threshold(
         model.fit(X_train, y_train)
         y_probs = model.predict_proba(X_val)[:, 1]
 
-        f1s = [(f1_score(y_val, (y_probs >= t).astype(int))) for t in thresholds]
+        best_t = None
+        best_metric = -1
+        best_fn_fp = float("inf")
+
+        for t in thresholds:
+            y_pred = (y_probs >= t).astype(int)
+
+            if metric == "f1":
+                score = f1_score(y_val, y_pred, zero_division=0)
+            elif metric == "precision":
+                score = precision_score(y_val, y_pred, zero_division=0)
+            elif metric == "recall":
+                score = recall_score(y_val, y_pred, zero_division=0)
+            elif metric == "roc_auc":
+                score = roc_auc_score(y_val, y_probs)
+            else:
+                raise ValueError(f"Unsupported metric: {metric}")
+
+            cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
+            tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
+            fn_fp = fn + fp
+
+            if score > best_metric or (score == best_metric and fn_fp < best_fn_fp):
+                best_metric = score
+                best_t = t
+                best_fn_fp = fn_fp
+
+        thresholds_found.append(best_t)
+        metrics.append(best_metric)
+        fn_list.append(fn)
+        fp_list.append(fp)
 
         print(
-            f"[Fold {fold}] Best threshold = {thresholds[np.argmax(f1s)]:.3f} → {METRIC} = {max(f1s):.4f}"
+            f"[Fold {fold}] ✅ threshold = {best_t:.3f} → {metric} = {best_metric:.4f}, FN+FP = {best_fn_fp}"
         )
 
-        all_scores.append(f1s)
-
-    mean_scores = np.mean(all_scores, axis=0)
-    global_best_index = int(np.argmax(mean_scores))
-    global_best_thresh = thresholds[global_best_index]
-    global_best_metric = mean_scores[global_best_index]
+    mean_t = np.mean(thresholds_found)
+    mean_metric = np.mean(metrics)
+    mean_fn = np.mean(fn_list)
+    mean_fp = np.mean(fp_list)
 
     print(
-        f"\n📌 Глобальный лучший threshold = {global_best_thresh:.3f} → {METRIC} = {global_best_metric:.4f}"
+        f"\n🎯 Финальный threshold = {mean_t:.3f} → {metric} = {mean_metric:.4f}, средние FN = {mean_fn:.1f}, FP = {mean_fp:.1f}"
     )
-
-    if plot:
-        plt.figure(figsize=(10, 6))
-        plt.plot(thresholds, mean_scores, marker="o", label=f"Средний {METRIC} по фолдам")
-        plt.axvline(
-            global_best_thresh,
-            color="red",
-            linestyle="--",
-            label=f"Best Threshold: {global_best_thresh:.3f}",
-        )
-        plt.xlabel("Threshold")
-        plt.ylabel(f"{METRIC}")
-        plt.title(f"Средний {METRIC} по threshold'ам")
-        plt.grid(True)
-        plt.legend()
-        plt.show()
-
-    return global_best_thresh
+    return mean_t, mean_metric, mean_fn, mean_fp
 
 
-def custom_cv_score(model, X, y, threshold, n_splits=5, metric="roc_auc"):
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+def custom_cv_score(model, X, y, threshold, n_splits=N_SPLITS, metric=METRIC):
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
     scores = []
 
     for train_idx, valid_idx in skf.split(X, y):
@@ -172,7 +205,7 @@ def custom_cv_score(model, X, y, threshold, n_splits=5, metric="roc_auc"):
             if not np.isnan(score):
                 scores.append(score)
         except Exception as e:
-            print(f"⚠️ Ошибка на фолде: {e}")
+            print(f"Ошибка на фолде: {e}")
             continue
 
     return np.mean(scores) if scores else float("nan")
@@ -206,16 +239,57 @@ def objective(trial, X_train, y_train, threshold):
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.2, 1.0),
             "scale_pos_weight": scale_pos_weight,
             "random_state": RANDOM_STATE,
-            "eval_metric": "logloss",
+            "eval_metric": EVAL_METRIC,
         }
 
         model = XGBClassifier(**params)
-        score_mean = custom_cv_score(model, X_train, y_train, threshold=threshold)
-        logger.info(f"Trial {trial.number} finished with {METRIC} score: {score_mean:.4f}")
-        return score_mean
+        skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+
+        recalls, precisions = [], []
+        fn_list, fp_list, tn_list, tp_list = [], [], [], []
+
+        for train_idx, valid_idx in skf.split(X_train, y_train):
+            X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[valid_idx]
+            y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[valid_idx]
+
+            model.fit(X_tr, y_tr)
+            y_proba = model.predict_proba(X_val)[:, 1]
+            y_pred = (y_proba >= threshold).astype(int)
+
+            r = recall_score(y_val, y_pred)
+            p = precision_score(y_val, y_pred, zero_division=0)
+
+            recalls.append(r)
+            precisions.append(p)
+
+            cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
+            if cm.shape == (2, 2):
+                tn, fp, fn, tp = cm.ravel()
+            else:
+                tn = cm[0, 0] if cm.shape[0] > 0 and cm.shape[1] > 0 else 0
+                fp = cm[0, 1] if cm.shape[0] > 0 and cm.shape[1] > 1 else 0
+                fn = cm[1, 0] if cm.shape[0] > 1 and cm.shape[1] > 0 else 0
+                tp = cm[1, 1] if cm.shape[0] > 1 and cm.shape[1] > 1 else 0
+
+            fn_list.append(fn)
+            fp_list.append(fp)
+            tn_list.append(tn)
+            tp_list.append(tp)
+
+        mean_recall = np.mean(recalls)
+        mean_precision = np.mean(precisions)
+        score = 0.9 * mean_recall + 0.1 * mean_precision
+
+        logger.info(
+            f"Trial {trial.number} → "
+            f"Recall: {mean_recall:.3f}, Precision: {mean_precision:.3f}, Score: {score:.3f} | "
+            f"FN: {np.mean(fn_list):.1f}, FP: {np.mean(fp_list):.1f}, TN: {np.mean(tn_list):.1f}, TP: {np.mean(tp_list):.1f}"
+        )
+        return score
+
     except Exception as e:
         logger.exception(f"Ошибка в objective: {e}")
-        raise
+        return -1
 
 
 def run_optuna_experiment(
@@ -244,19 +318,16 @@ def run_optuna_experiment(
         manual_optuna_progress(study, n_trials, optuna_objective)
 
         best_params = study.best_trial.params
-        best_mean_score = study.best_value
 
         final_model = XGBClassifier(
             **best_params,
             scale_pos_weight=scale_pos_weight,
             random_state=RANDOM_STATE,
-            eval_metric="logloss",
+            eval_metric=EVAL_METRIC,
         )
         final_model.fit(X_train, y_train)
-        y_pred_proba = final_model.predict_proba(X_test)[:, 1]
+        y_pred_proba = final_model.predict_proba(X_test)[:, 1]  # или X_val — по месту
         y_pred = (y_pred_proba >= global_threshold).astype(int)
-
-        tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
 
         final_metrics = {
             "accuracy": accuracy_score(y_test, y_pred),
@@ -273,7 +344,7 @@ def run_optuna_experiment(
                 old_metrics = old_model_bundle.get("metrics", {})
                 logger.info(f"Старая модель: {old_metrics}")
                 logger.info(f"Новая модель: {final_metrics}")
-                save_model = is_new_model_better(final_metrics, old_metrics, metric)
+                save_model = is_new_model_better(final_metrics, old_metrics)
 
                 if save_model:
                     logger.info(f"{GREEN}Новая модель лучше — сохраняем.{RESET}")
@@ -339,7 +410,7 @@ def run_optuna_experiment(
             mlflow.log_metric("roc_auc_test", round(final_metrics["roc_auc"], 3))
 
             mlflow.log_artifact(model_output_path)
-            mlflow.sklearn.log_model(final_model, name="final_model", input_example=input_example)
+            mlflow.sklearn.log_model(final_model, name="final_model", input_example=input_example)  # type: ignore
 
             # Confusion matrix
             fig_cm, ax_cm = plt.subplots()
@@ -371,7 +442,7 @@ def run_optuna_experiment(
             os.remove("shap_dot_plot.png")
 
             # Threshold vs metrics
-            thresholds = np.arange(0.3, 1.0, 0.01)
+            thresholds = np.arange(0.1, 0.9, 0.01)
             f1s, precisions, recalls = [], [], []
             for t in thresholds:
                 y_pred_temp = (y_pred_proba >= t).astype(int)
@@ -460,9 +531,16 @@ if __name__ == "__main__":
     base_model_main = XGBClassifier(
         scale_pos_weight=Counter(y_main)[0] / Counter(y_main)[1],
         random_state=RANDOM_STATE,
-        eval_metric="logloss",
+        eval_metric=EVAL_METRIC,
     )
-    global_threshold_main = cross_val_best_threshold(base_model_main, X_main, y_main)
+
+    global_threshold_main, f1, fn, fp = cross_val_best_threshold(
+        base_model_main, X_main, y_main, metric=METRIC
+    )
+
+    print(
+        f"Выбранный threshold для all = {global_threshold_main:.3f}, f1 = {f1:.4f}, fn = {fn:.4f}, fp = {fp:.4f}"
+    )
 
     X_train_main, X_test_main, y_train_main, y_test_main = train_test_split(
         X_main, y_main, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_main
@@ -485,9 +563,16 @@ if __name__ == "__main__":
     base_model_top = XGBClassifier(
         scale_pos_weight=Counter(y_top)[0] / Counter(y_top)[1],
         random_state=RANDOM_STATE,
-        eval_metric="logloss",
+        eval_metric=EVAL_METRIC,
     )
-    global_threshold_top = cross_val_best_threshold(base_model_top, X_top, y_top)
+
+    global_threshold_top, f1, fn, fp = cross_val_best_threshold(
+        base_model_top, X_main, y_main, metric=METRIC
+    )
+
+    print(
+        f"Выбранный threshold для top = {global_threshold_main:.3f}, f1 = {f1:.4f}, fn = {fn:.4f}, fp = {fp:.4f}"
+    )
 
     X_train_top, X_test_top, y_train_top, y_test_top = train_test_split(
         X_top, y_top, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_top

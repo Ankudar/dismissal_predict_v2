@@ -1,20 +1,13 @@
 from datetime import datetime
 import logging
-import re
 
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from rusgenderdetection import get_gender  # type: ignore
-import seaborn as sns
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import (
-    MinMaxScaler,
-    OneHotEncoder,
-    OrdinalEncoder,
-    RobustScaler,
-)
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, RobustScaler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -387,14 +380,14 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         # --- Возраст и стаж ---
         main_users["возраст"] = np.where(
             main_users["дата_рождения"].notna(),
-            (today - main_users["дата_рождения"]).dt.days // 365,
+            (today - main_users["дата_рождения"]).dt.days // 365,  # type: ignore
             np.nan,
         )
 
         main_users["стаж"] = np.where(
             main_users["дата_увольнения"].notna(),
             (main_users["дата_увольнения"] - main_users["дата_приема_в_1с"]).dt.days / 365,
-            (today - main_users["дата_приема_в_1с"]).dt.days / 365,
+            (today - main_users["дата_приема_в_1с"]).dt.days / 365,  # type: ignore
         )
         main_users["стаж"] = np.maximum(main_users["стаж"], 0)
 
