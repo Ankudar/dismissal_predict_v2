@@ -1,0 +1,13 @@
+{
+  "users": [
+  ],
+  "projects": [
+    {
+      "id": "dismissial_predict",
+      "data": "Предсказание увольнений",
+      "allowed_users": [
+        "some_user"
+      ]
+    }
+  ]
+}
