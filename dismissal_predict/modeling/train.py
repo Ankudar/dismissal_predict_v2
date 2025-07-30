@@ -45,7 +45,7 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 300  # иттерации для оптуны
+N_TRIALS = 10  # иттерации для оптуны
 N_SPLITS = 15  # число кроссвалидаций
 METRIC = "custom"
 EVAL_METRIC = "logloss"
@@ -626,7 +626,7 @@ if __name__ == "__main__":
     )
 
     global_threshold_top, f1, fn, fp = cross_val_best_threshold(
-        base_model_top, X_main, y_main, metric=METRIC
+        base_model_top, X_top, y_top, metric=METRIC
     )
 
     print(
