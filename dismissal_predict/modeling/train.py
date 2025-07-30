@@ -45,8 +45,8 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 200  # иттерации для оптуны
-N_SPLITS = 10  # число кроссвалидаций
+N_TRIALS = 300  # иттерации для оптуны
+N_SPLITS = 15  # число кроссвалидаций
 METRIC = "custom"
 EVAL_METRIC = "logloss"
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
@@ -59,6 +59,11 @@ warnings.filterwarnings("ignore")
 
 main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
+
+
+def custom_metric(recall, precision):
+    metric = 0.8 * recall + 0.2 * precision
+    return metric
 
 
 def is_new_model_better(new_metrics, old_metrics, delta=0.001):
@@ -155,7 +160,7 @@ def cross_val_best_threshold(
             elif metric == "custom":
                 recall = recall_score(y_val, y_pred, zero_division=0)
                 precision = precision_score(y_val, y_pred, zero_division=0)
-                score = 0.8 * recall + 0.2 * precision
+                score = custom_metric(recall, precision)
             else:
                 raise ValueError(f"Unsupported metric: {metric}")
 
@@ -318,7 +323,7 @@ def objective(trial, X_train, y_train, threshold):
         elif METRIC == "precision":
             score = mean_precision
         elif METRIC == "custom":
-            score = 0.8 * mean_recall + 0.2 * mean_precision
+            score = custom_metric(mean_recall, mean_precision)
         else:
             logger.warning(f"Неизвестная метрика '{METRIC}', используется recall по умолчанию.")
             score = mean_recall
@@ -373,13 +378,16 @@ def run_optuna_experiment(
         final_model.fit(X_train, y_train)
         y_pred_proba = final_model.predict_proba(X_test)[:, 1]
         y_pred = (y_pred_proba >= global_threshold).astype(int)
+        recall = recall_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred)
 
         final_metrics = {
             "accuracy": accuracy_score(y_test, y_pred),
-            "precision": precision_score(y_test, y_pred),
-            "recall": recall_score(y_test, y_pred),
+            "precision": precision,
+            "recall": recall,
             "roc_auc": roc_auc_score(y_test, y_pred_proba),
             "f1": f1_score(y_test, y_pred),
+            "custom": custom_metric(recall, precision),
         }
 
         save_model = True
@@ -416,13 +424,16 @@ def run_optuna_experiment(
         # Метрики на трейне
         y_pred_proba_train = final_model.predict_proba(X_train)[:, 1]
         y_pred_train = (y_pred_proba_train >= global_threshold).astype(int)
+        recall_train = recall_score(y_train, y_pred_train)
+        precision_train = precision_score(y_train, y_pred_train)
 
         final_metrics_train = {
             "accuracy": accuracy_score(y_train, y_pred_train),
-            "precision": precision_score(y_train, y_pred_train),
-            "recall": recall_score(y_train, y_pred_train),
+            "precision": precision_train,
+            "recall": recall_train,
             "roc_auc": roc_auc_score(y_train, y_pred_proba_train),
             "f1": f1_score(y_train, y_pred_train),
+            "custom": custom_metric(recall_train, precision_train),
         }
 
         if mlflow.active_run():
@@ -453,6 +464,9 @@ def run_optuna_experiment(
 
             mlflow.log_metric("roc_auc_train", round(final_metrics_train["roc_auc"], 3))
             mlflow.log_metric("roc_auc_test", round(final_metrics["roc_auc"], 3))
+
+            mlflow.log_metric("custom_train", round(final_metrics_train["custom"], 3))
+            mlflow.log_metric("custom_test", round(final_metrics["custom"], 3))
 
             mlflow.log_artifact(model_output_path)
             mlflow.sklearn.log_model(final_model, name="final_model", input_example=input_example)  # type: ignore
