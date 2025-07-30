@@ -47,7 +47,7 @@ TEST_SIZE = 0.2
 RANDOM_STATE = 40
 N_TRIALS = 200  # иттерации для оптуны
 N_SPLITS = 10  # число кроссвалидаций
-METRIC = "f1"
+METRIC = "custom"
 EVAL_METRIC = "logloss"
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
 MLFLOW_EXPERIMENT_TOP = "xgboost_top_users"
@@ -265,13 +265,13 @@ def objective(trial, X_train, y_train, threshold):
             "eval_metric": EVAL_METRIC,
         }
 
-        model = XGBClassifier(**params)
         skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
 
-        recalls, precisions = [], []
+        recalls, precisions, f1s, accuracies = [], [], [], []
         fn_list, fp_list, tn_list, tp_list = [], [], [], []
 
         for train_idx, valid_idx in skf.split(X_train, y_train):
+            model = XGBClassifier(**params)
             X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[valid_idx]
             y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[valid_idx]
 
@@ -279,11 +279,10 @@ def objective(trial, X_train, y_train, threshold):
             y_proba = model.predict_proba(X_val)[:, 1]
             y_pred = (y_proba >= threshold).astype(int)
 
-            r = recall_score(y_val, y_pred)
-            p = precision_score(y_val, y_pred, zero_division=0)
-
-            recalls.append(r)
-            precisions.append(p)
+            recalls.append(recall_score(y_val, y_pred))
+            precisions.append(precision_score(y_val, y_pred, zero_division=0))
+            f1s.append(f1_score(y_val, y_pred, zero_division=0))
+            accuracies.append(accuracy_score(y_val, y_pred))
 
             cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
             if cm.shape == (2, 2):
@@ -299,15 +298,34 @@ def objective(trial, X_train, y_train, threshold):
             tn_list.append(tn)
             tp_list.append(tp)
 
+        # Средние значения по фолдам
         mean_recall = np.mean(recalls)
         mean_precision = np.mean(precisions)
-        score = 0.9 * mean_recall + 0.1 * mean_precision
+        mean_f1 = np.mean(f1s)
+        mean_accuracy = np.mean(accuracies)
+
+        # Выбор метрики
+        if METRIC == "f1":
+            score = mean_f1
+        elif METRIC == "accuracy":
+            score = mean_accuracy
+        elif METRIC == "recall":
+            score = mean_recall
+        elif METRIC == "precision":
+            score = mean_precision
+        elif METRIC == "custom":
+            score = 0.8 * mean_recall + 0.2 * mean_precision
+        else:
+            logger.warning(f"Неизвестная метрика '{METRIC}', используется recall по умолчанию.")
+            score = mean_recall
 
         logger.info(
             f"Trial {trial.number} → "
-            f"Recall: {mean_recall:.3f}, Precision: {mean_precision:.3f}, Score: {score:.3f} | "
+            f"Recall: {mean_recall:.3f}, Precision: {mean_precision:.3f}, F1: {mean_f1:.3f}, "
+            f"Accuracy: {mean_accuracy:.3f}, Score: {score:.3f} | "
             f"FN: {np.mean(fn_list):.1f}, FP: {np.mean(fp_list):.1f}, TN: {np.mean(tn_list):.1f}, TP: {np.mean(tp_list):.1f}"
         )
+
         return score
 
     except Exception as e:
@@ -574,7 +592,7 @@ if __name__ == "__main__":
         y_train=y_train_main,
         X_test=X_test_main,
         y_test=y_test_main,
-        metric=f"{METRIC}",
+        metric=METRIC,
         n_trials=N_TRIALS,
         experiment_name=MLFLOW_EXPERIMENT_MAIN,
         model_output_path=f"{MODELS}/xgb_main_users.pkl",
@@ -606,7 +624,7 @@ if __name__ == "__main__":
         y_train=y_train_top,
         X_test=X_test_top,
         y_test=y_test_top,
-        metric=f"{METRIC}",
+        metric=METRIC,
         n_trials=N_TRIALS,
         experiment_name=MLFLOW_EXPERIMENT_TOP,
         model_output_path=f"{MODELS}/xgb_top_users.pkl",
