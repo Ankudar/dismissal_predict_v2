@@ -152,6 +152,10 @@ def cross_val_best_threshold(
                 score = recall_score(y_val, y_pred, zero_division=0)
             elif metric == "roc_auc":
                 score = roc_auc_score(y_val, y_probs)
+            elif metric == "custom":
+                recall = recall_score(y_val, y_pred, zero_division=0)
+                precision = precision_score(y_val, y_pred, zero_division=0)
+                score = 0.8 * recall + 0.2 * precision
             else:
                 raise ValueError(f"Unsupported metric: {metric}")
 
