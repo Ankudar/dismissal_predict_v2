@@ -127,10 +127,7 @@ def cross_val_best_threshold(
     print(f"Поиск threshold по метрике {metric.upper()} с минимальными FN + FP...\n")
 
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    thresholds_found = []
-    metrics = []
-    fn_list = []
-    fp_list = []
+    fold_results = []
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
@@ -142,6 +139,7 @@ def cross_val_best_threshold(
         best_t = None
         best_metric = -1
         best_fn_fp = float("inf")
+        best_fn = best_fp = None
 
         for t in thresholds:
             y_pred = (y_probs >= t).astype(int)
@@ -165,23 +163,37 @@ def cross_val_best_threshold(
                 best_metric = score
                 best_t = t
                 best_fn_fp = fn_fp
+                best_fn = fn
+                best_fp = fp
 
-        thresholds_found.append(best_t)
-        metrics.append(best_metric)
-        fn_list.append(fn)
-        fp_list.append(fp)
+        fold_results.append(
+            {
+                "fold": fold,
+                "threshold": best_t,
+                "metric": best_metric,
+                "fn": best_fn,
+                "fp": best_fp,
+                "fn_fp": best_fn_fp,
+            }
+        )
 
         print(
             f"[Fold {fold}] ✅ threshold = {best_t:.3f} → {metric} = {best_metric:.4f}, FN+FP = {best_fn_fp}"
         )
 
-    mean_t = np.mean(thresholds_found)
-    mean_metric = np.mean(metrics)
-    mean_fn = np.mean(fn_list)
-    mean_fp = np.mean(fp_list)
+    # Сортировка по метрике по убыванию, далее по fn+fp по возрастанию
+    fold_results = sorted(fold_results, key=lambda x: (-x["metric"], x["fn_fp"]))
+
+    top_k = n_splits // 2  # половина фолдов
+    top_folds = fold_results[:top_k]
+
+    mean_t = np.mean([r["threshold"] for r in top_folds])
+    mean_metric = np.mean([r["metric"] for r in top_folds])
+    mean_fn = np.mean([r["fn"] for r in top_folds])
+    mean_fp = np.mean([r["fp"] for r in top_folds])
 
     print(
-        f"\n🎯 Финальный threshold = {mean_t:.3f} → {metric} = {mean_metric:.4f}, средние FN = {mean_fn:.1f}, FP = {mean_fp:.1f}"
+        f"\n🎯 Финальный threshold = {mean_t:.3f} → {metric} = {mean_metric:.4f}, средние FN = {mean_fn:.1f}, FP = {mean_fp:.1f} (по top-{top_k} фолдам)"
     )
     return mean_t, mean_metric, mean_fn, mean_fp
 
