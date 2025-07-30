@@ -337,7 +337,7 @@ def run_optuna_experiment(
             eval_metric=EVAL_METRIC,
         )
         final_model.fit(X_train, y_train)
-        y_pred_proba = final_model.predict_proba(X_test)[:, 1]  # или X_val — по месту
+        y_pred_proba = final_model.predict_proba(X_test)[:, 1]
         y_pred = (y_pred_proba >= global_threshold).astype(int)
 
         final_metrics = {
