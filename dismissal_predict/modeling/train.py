@@ -45,7 +45,7 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.3
 RANDOM_STATE = 40
-N_TRIALS = 20  # итерации для оптуны
+N_TRIALS = 100  # итерации для оптуны
 N_SPLITS = 5  # число кроссвалидаций
 METRIC = "custom"
 EVAL_METRIC = "logloss"
@@ -62,39 +62,50 @@ top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
 def custom_metric_from_counts(tp, tn, fn, fp):
+    fn_weight = 2.0
+    fp_weight = 0.5
+
     total = tp + tn + fn + fp
     if total == 0:
-        return 0
-    score = (tp + tn) - 1.5 * fn - 0.5 * fp
-    return score / total
+        return 0.0
+
+    # Нормализуем: минимально возможный score (все ошибки) и максимально возможный (всё правильно)
+    raw_score = (tp + tn) - fn_weight * fn - fp_weight * fp
+    max_score = total  # если все предсказания верны → tp + tn = total
+    min_score = -(fn_weight + fp_weight) * total / 2  # worst case approximation
+
+    # Приводим к [0, 1]
+    norm_score = (raw_score - min_score) / (max_score - min_score)
+    return max(0.0, min(1.0, norm_score))
 
 
 def is_new_model_better(new_metrics, old_metrics, delta=0.001):
     def round3(x):
         return round(x or 0, 3)
 
-    new_f1 = round3(new_metrics.get("f1"))
-    old_f1 = round3(old_metrics.get("f1"))
+    new_score = round3(new_metrics.get(METRIC, 0))
+    old_score = round3(old_metrics.get(METRIC, 0))
 
-    if new_f1 > old_f1:
+    if new_score > old_score + delta:
         return True
-    if new_f1 < old_f1:
+    if new_score < old_score - delta:
         return False
 
-    # f1 равны — сравниваем recall
-    new_recall = round3(new_metrics.get("recall"))
-    old_recall = round3(old_metrics.get("recall"))
+    # Если основной METRIC — f1, сравниваем дальше по recall, precision
+    if METRIC == "f1":
+        new_recall = round3(new_metrics.get("recall", 0))
+        old_recall = round3(old_metrics.get("recall", 0))
+        if new_recall > old_recall + delta:
+            return True
+        if new_recall < old_recall - delta:
+            return False
 
-    if new_recall > old_recall:
-        return True
-    if new_recall < old_recall:
-        return False
+        new_precision = round3(new_metrics.get("precision", 0))
+        old_precision = round3(old_metrics.get("precision", 0))
+        return new_precision > old_precision + delta
 
-    # recall равны — сравниваем precision
-    new_precision = round3(new_metrics.get("precision"))
-    old_precision = round3(old_metrics.get("precision"))
-
-    return new_precision > old_precision
+    # Если не f1 и равны — не сохраняем
+    return False
 
 
 def manual_optuna_progress(study, n_trials, func):
@@ -447,6 +458,7 @@ def run_optuna_experiment(
             mlflow.log_param("test_size", TEST_SIZE)
             mlflow.log_param("random_state", RANDOM_STATE)
             mlflow.log_param("n_trials", n_trials)
+            mlflow.log_param("n_splits", N_SPLITS)
             mlflow.log_param("model_type", "XGBoostClassifier")
             mlflow.log_param("threshold", round(best_threshold, 4))
 
