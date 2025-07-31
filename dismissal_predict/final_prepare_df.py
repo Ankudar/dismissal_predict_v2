@@ -284,26 +284,6 @@ def convert_dates(df):
         raise
 
 
-def mode_with_tie(series):
-    try:
-        if series.empty:
-            return "none"
-
-        counts = series.value_counts()
-        m_count = counts.get("m", 0)
-        f_count = counts.get("f", 0)
-
-        if m_count > f_count:
-            return "m"
-        elif f_count > m_count:
-            return "f"
-        else:
-            return "mf"
-    except Exception as e:
-        logger.info(f"Ошибка в mode_with_tie: {e}")
-        raise
-
-
 def extract_first_name(full_name):
     # Проверка на NaN
     if pd.isna(full_name):
@@ -340,7 +320,8 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
             .agg(
                 число_детей=("name", "count"),
                 средний_возраст_детей=("age", "mean"),
-                средний_пол_детей=("gender", mode_with_tie),
+                дети_мальчики=("gender", lambda x: (x == "m").sum()),
+                дети_девочки=("gender", lambda x: (x == "f").sum()),
             )
             .reset_index()
         )
@@ -359,6 +340,11 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users = merge_base([main_users, users_cadr], "фио", "right")
         main_users = merge_base([main_users, users_salary], "фио", "left")
         main_users = merge_base([main_users, grouped_children], "id", "left")
+
+        for col in ["число_детей", "дети_мальчики", "дети_девочки"]:
+            if col in main_users.columns:
+                main_users[col] = main_users[col].fillna(0).round().astype(int)
+
         main_users = merge_base([main_users, director], "id", "left")
 
         # --- Очистка ---
@@ -448,7 +434,6 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
             "NaNs in main_users_for_train:\n",
             main_users_for_train.isnull().sum()[main_users_for_train.isnull().any()],
         )
-
     except Exception as e:
         logger.info(f"Ошибка: {e}")
         raise

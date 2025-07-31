@@ -45,8 +45,8 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.3
 RANDOM_STATE = 40
-N_TRIALS = 100  # итерации для оптуны
-N_SPLITS = 5  # число кроссвалидаций
+N_TRIALS = 200  # итерации для оптуны
+N_SPLITS = 10  # число кроссвалидаций
 METRIC = "custom"
 EVAL_METRIC = "logloss"
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
@@ -62,7 +62,7 @@ top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
 def custom_metric_from_counts(tp, tn, fn, fp):
-    fn_weight = 2.0
+    fn_weight = 3.0
     fp_weight = 0.5
 
     total = tp + tn + fn + fp
@@ -227,12 +227,21 @@ def objective(trial, X_train, y_train):
             model.fit(X_tr, y_tr)
             y_proba = model.predict_proba(X_val)[:, 1]
 
-            # Подбор лучшего threshold по выбранной метрике
+            # Подбор threshold с учетом FN <= FP
             thresholds = np.arange(0.01, 0.91, 0.01)
             best_score = -np.inf
             best_threshold = 0.5
+
             for t in thresholds:
                 y_pred_t = (y_proba >= t).astype(int)
+                cm_t = confusion_matrix(y_val, y_pred_t, labels=[0, 1])
+                tn, fp, fn, tp = cm_t.ravel() if cm_t.shape == (2, 2) else (0, 0, 0, 0)
+
+                # Условие: FN должно быть меньше или равно FP
+                if fn > fp:
+                    continue
+
+                # Выбор метрики
                 if METRIC == "f1":
                     score_t = f1_score(y_val, y_pred_t, zero_division=0)
                 elif METRIC == "accuracy":
@@ -242,8 +251,6 @@ def objective(trial, X_train, y_train):
                 elif METRIC == "precision":
                     score_t = precision_score(y_val, y_pred_t, zero_division=0)
                 elif METRIC == "custom":
-                    cm_t = confusion_matrix(y_val, y_pred_t, labels=[0, 1])
-                    tn, fp, fn, tp = cm_t.ravel() if cm_t.shape == (2, 2) else (0, 0, 0, 0)
                     score_t = custom_metric_from_counts(tp=tp, tn=tn, fn=fn, fp=fp)
                 else:
                     score_t = recall_score(y_val, y_pred_t)
@@ -251,10 +258,11 @@ def objective(trial, X_train, y_train):
                 if score_t > best_score:
                     best_score = score_t
                     best_threshold = t
-                fold_thresholds.append(best_threshold)
 
+            fold_thresholds.append(best_threshold)
             y_pred = (y_proba >= best_threshold).astype(int)
 
+            # Метрики
             recalls.append(recall_score(y_val, y_pred))
             precisions.append(precision_score(y_val, y_pred, zero_division=0))
             f1s.append(f1_score(y_val, y_pred, zero_division=0))
@@ -275,13 +283,12 @@ def objective(trial, X_train, y_train):
             tn_list.append(tn)
             tp_list.append(tp)
 
-        # Средние значения по фолдам
+        # Средние метрики
         mean_recall = np.mean(recalls)
         mean_precision = np.mean(precisions)
         mean_f1 = np.mean(f1s)
         mean_accuracy = np.mean(accuracies)
 
-        # Финальный скор по выбранной метрике
         if METRIC == "f1":
             score = mean_f1
         elif METRIC == "accuracy":
