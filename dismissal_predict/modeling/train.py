@@ -43,10 +43,10 @@ os.makedirs(MODELS, exist_ok=True)
 INPUT_FILE_MAIN_USERS = f"{DATA_PROCESSED}/main_users_for_train.csv"
 INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
-TEST_SIZE = 0.2
+TEST_SIZE = 0.25
 RANDOM_STATE = 40
-N_TRIALS = 10  # иттерации для оптуны
-N_SPLITS = 15  # число кроссвалидаций
+N_TRIALS = 300  # иттерации для оптуны
+N_SPLITS = 10  # число кроссвалидаций
 METRIC = "custom"
 EVAL_METRIC = "logloss"
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
@@ -62,7 +62,7 @@ top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
 def custom_metric(recall, precision):
-    metric = 0.8 * recall + 0.2 * precision
+    metric = 0.7 * recall + 0.3 * precision
     return metric
 
 
@@ -193,7 +193,7 @@ def cross_val_best_threshold(
     # Сортировка по метрике по убыванию, далее по fn+fp по возрастанию
     fold_results = sorted(fold_results, key=lambda x: (-x["metric"], x["fn_fp"]))
 
-    top_k = n_splits // 2  # половина фолдов
+    top_k = n_splits // 3  # часть фолдов
     top_folds = fold_results[:top_k]
 
     mean_t = np.mean([r["threshold"] for r in top_folds])
@@ -202,7 +202,7 @@ def cross_val_best_threshold(
     mean_fp = np.mean([r["fp"] for r in top_folds])
 
     print(
-        f"\n🎯 Финальный threshold = {mean_t:.3f} → {metric} = {mean_metric:.4f}, средние FN = {mean_fn:.1f}, FP = {mean_fp:.1f} (по top-{top_k} фолдам)"
+        f"\nФинальный threshold = {mean_t:.3f} → {metric} = {mean_metric:.4f}, средние FN = {mean_fn:.1f}, FP = {mean_fp:.1f} (по top-{top_k} фолдам)"
     )
     return mean_t, mean_metric, mean_fn, mean_fp
 
@@ -231,6 +231,10 @@ def custom_cv_score(model, X, y, threshold, n_splits=N_SPLITS, metric=METRIC):
                     score = precision_score(y_valid_fold, y_preds)
                 elif metric == "roc_auc":
                     score = roc_auc_score(y_valid_fold, y_probs)
+                elif METRIC == "custom":
+                    recall = recall_score(y_valid_fold, y_preds, zero_division=0)
+                    precision = precision_score(y_valid_fold, y_preds, zero_division=0)
+                    score = custom_metric(recall, precision)
                 else:
                     raise ValueError(f"Unsupported metric: {metric}")
 
