@@ -45,8 +45,8 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.25
 RANDOM_STATE = 40
-N_TRIALS = 300  # иттерации для оптуны
-N_SPLITS = 10  # число кроссвалидаций
+N_TRIALS = 2  # итерации для оптуны
+N_SPLITS = 5  # число кроссвалидаций
 METRIC = "custom"
 EVAL_METRIC = "logloss"
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
@@ -61,9 +61,12 @@ main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
-def custom_metric(recall, precision):
-    metric = 0.7 * recall + 0.3 * precision
-    return metric
+def custom_metric_from_counts(tp, tn, fn, fp):
+    total = tp + tn + fn + fp
+    if total == 0:
+        return 0
+    score = (tp + tn) - 1.5 * fn - 0.5 * fp
+    return score / total
 
 
 def is_new_model_better(new_metrics, old_metrics, delta=0.001):
@@ -148,6 +151,9 @@ def cross_val_best_threshold(
 
         for t in thresholds:
             y_pred = (y_probs >= t).astype(int)
+            cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
+            tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
+            fn_fp = fn + fp
 
             if metric == "f1":
                 score = f1_score(y_val, y_pred, zero_division=0)
@@ -158,15 +164,9 @@ def cross_val_best_threshold(
             elif metric == "roc_auc":
                 score = roc_auc_score(y_val, y_probs)
             elif metric == "custom":
-                recall = recall_score(y_val, y_pred, zero_division=0)
-                precision = precision_score(y_val, y_pred, zero_division=0)
-                score = custom_metric(recall, precision)
+                score = custom_metric_from_counts(tp, tn, fn, fp)
             else:
                 raise ValueError(f"Unsupported metric: {metric}")
-
-            cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
-            tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
-            fn_fp = fn + fp
 
             if score > best_metric or (score == best_metric and fn_fp < best_fn_fp):
                 best_metric = score
@@ -231,10 +231,16 @@ def custom_cv_score(model, X, y, threshold, n_splits=N_SPLITS, metric=METRIC):
                     score = precision_score(y_valid_fold, y_preds)
                 elif metric == "roc_auc":
                     score = roc_auc_score(y_valid_fold, y_probs)
-                elif METRIC == "custom":
-                    recall = recall_score(y_valid_fold, y_preds, zero_division=0)
-                    precision = precision_score(y_valid_fold, y_preds, zero_division=0)
-                    score = custom_metric(recall, precision)
+                elif metric == "custom":
+                    cm = confusion_matrix(y_valid_fold, y_preds, labels=[0, 1])
+                    if cm.shape == (2, 2):
+                        tn, fp, fn, tp = cm.ravel()
+                    else:
+                        tn = cm[0, 0] if cm.shape[0] > 0 and cm.shape[1] > 0 else 0
+                        fp = cm[0, 1] if cm.shape[0] > 0 and cm.shape[1] > 1 else 0
+                        fn = cm[1, 0] if cm.shape[0] > 1 and cm.shape[1] > 0 else 0
+                        tp = cm[1, 1] if cm.shape[0] > 1 and cm.shape[1] > 1 else 0
+                    score = custom_metric_from_counts(tp, tn, fn, fp)
                 else:
                     raise ValueError(f"Unsupported metric: {metric}")
 
@@ -268,11 +274,13 @@ def objective(trial, X_train, y_train, threshold):
         scale_pos_weight = counter[0] / counter[1]
 
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 10, 500),
-            "max_depth": trial.suggest_int("max_depth", 2, 300),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.7),
+            "n_estimators": trial.suggest_int("n_estimators", 10, 400),
+            "max_depth": trial.suggest_int("max_depth", 2, 10),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3),
             "subsample": trial.suggest_float("subsample", 0.2, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.2, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 1.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
             "scale_pos_weight": scale_pos_weight,
             "random_state": RANDOM_STATE,
             "eval_metric": EVAL_METRIC,
@@ -298,6 +306,7 @@ def objective(trial, X_train, y_train, threshold):
             accuracies.append(accuracy_score(y_val, y_pred))
 
             cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
+            tp = tn = fp = fn = 0
             if cm.shape == (2, 2):
                 tn, fp, fn, tp = cm.ravel()
             else:
@@ -327,7 +336,12 @@ def objective(trial, X_train, y_train, threshold):
         elif METRIC == "precision":
             score = mean_precision
         elif METRIC == "custom":
-            score = custom_metric(mean_recall, mean_precision)
+            score = custom_metric_from_counts(
+                tp=int(np.mean(tp_list)),
+                tn=int(np.mean(tn_list)),
+                fn=int(np.mean(fn_list)),
+                fp=int(np.mean(fp_list)),
+            )
         else:
             logger.warning(f"Неизвестная метрика '{METRIC}', используется recall по умолчанию.")
             score = mean_recall
@@ -384,6 +398,10 @@ def run_optuna_experiment(
         y_pred = (y_pred_proba >= global_threshold).astype(int)
         recall = recall_score(y_test, y_pred)
         precision = precision_score(y_test, y_pred)
+        cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
+        tp = tn = fp = fn = 0
+        if cm.shape == (2, 2):
+            tn, fp, fn, tp = cm.ravel()
 
         final_metrics = {
             "accuracy": accuracy_score(y_test, y_pred),
@@ -391,7 +409,7 @@ def run_optuna_experiment(
             "recall": recall,
             "roc_auc": roc_auc_score(y_test, y_pred_proba),
             "f1": f1_score(y_test, y_pred),
-            "custom": custom_metric(recall, precision),
+            "custom": custom_metric_from_counts(tp, tn, fn, fp),
         }
 
         save_model = True
@@ -430,6 +448,10 @@ def run_optuna_experiment(
         y_pred_train = (y_pred_proba_train >= global_threshold).astype(int)
         recall_train = recall_score(y_train, y_pred_train)
         precision_train = precision_score(y_train, y_pred_train)
+        cm_train = confusion_matrix(y_train, y_pred_train, labels=[0, 1])
+        tp = tn = fp = fn = 0
+        if cm_train.shape == (2, 2):
+            tn, fp, fn, tp = cm_train.ravel()
 
         final_metrics_train = {
             "accuracy": accuracy_score(y_train, y_pred_train),
@@ -437,7 +459,7 @@ def run_optuna_experiment(
             "recall": recall_train,
             "roc_auc": roc_auc_score(y_train, y_pred_proba_train),
             "f1": f1_score(y_train, y_pred_train),
-            "custom": custom_metric(recall_train, precision_train),
+            "custom": custom_metric_from_counts(tp, tn, fn, fp),
         }
 
         if mlflow.active_run():
@@ -450,7 +472,6 @@ def run_optuna_experiment(
             mlflow.log_param("n_trials", n_trials)
             mlflow.log_param("model_type", "XGBoostClassifier")
             mlflow.log_param("threshold", round(global_threshold, 4))
-            mlflow.log_param("global_threshold", round(global_threshold, 4))
 
             mlflow.log_param("opt_metric", f"{METRIC}")
 
@@ -634,7 +655,7 @@ if __name__ == "__main__":
     )
 
     print(
-        f"Выбранный threshold для top = {global_threshold_main:.3f}, f1 = {f1:.4f}, fn = {fn:.4f}, fp = {fp:.4f}"
+        f"Выбранный threshold для top = {global_threshold_top:.3f}, f1 = {f1:.4f}, fn = {fn:.4f}, fp = {fp:.4f}"
     )
 
     X_train_top, X_test_top, y_train_top, y_test_top = train_test_split(
