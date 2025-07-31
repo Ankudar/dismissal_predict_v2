@@ -43,9 +43,9 @@ os.makedirs(MODELS, exist_ok=True)
 INPUT_FILE_MAIN_USERS = f"{DATA_PROCESSED}/main_users_for_train.csv"
 INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
-TEST_SIZE = 0.25
+TEST_SIZE = 0.3
 RANDOM_STATE = 40
-N_TRIALS = 2  # итерации для оптуны
+N_TRIALS = 20  # итерации для оптуны
 N_SPLITS = 5  # число кроссвалидаций
 METRIC = "custom"
 EVAL_METRIC = "logloss"
@@ -123,90 +123,6 @@ def convert_all_to_float(df: pd.DataFrame, exclude_cols=None):
     return df
 
 
-def cross_val_best_threshold(
-    model,
-    X,
-    y,
-    thresholds=np.arange(0.01, 0.9, 0.01),
-    metric=METRIC,
-    n_splits=N_SPLITS,
-    random_state=RANDOM_STATE,
-):
-    print(f"Поиск threshold по метрике {metric.upper()} с минимальными FN + FP...\n")
-
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    fold_results = []
-
-    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
-        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-
-        model.fit(X_train, y_train)
-        y_probs = model.predict_proba(X_val)[:, 1]
-
-        best_t = None
-        best_metric = -1
-        best_fn_fp = float("inf")
-        best_fn = best_fp = None
-
-        for t in thresholds:
-            y_pred = (y_probs >= t).astype(int)
-            cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
-            tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
-            fn_fp = fn + fp
-
-            if metric == "f1":
-                score = f1_score(y_val, y_pred, zero_division=0)
-            elif metric == "precision":
-                score = precision_score(y_val, y_pred, zero_division=0)
-            elif metric == "recall":
-                score = recall_score(y_val, y_pred, zero_division=0)
-            elif metric == "roc_auc":
-                score = roc_auc_score(y_val, y_probs)
-            elif metric == "custom":
-                score = custom_metric_from_counts(tp, tn, fn, fp)
-            else:
-                raise ValueError(f"Unsupported metric: {metric}")
-
-            if score > best_metric or (score == best_metric and fn_fp < best_fn_fp):
-                best_metric = score
-                best_t = t
-                best_fn_fp = fn_fp
-                best_fn = fn
-                best_fp = fp
-
-        fold_results.append(
-            {
-                "fold": fold,
-                "threshold": best_t,
-                "metric": best_metric,
-                "fn": best_fn,
-                "fp": best_fp,
-                "fn_fp": best_fn_fp,
-            }
-        )
-
-        print(
-            f"[Fold {fold}] ✅ threshold = {best_t:.3f} → {metric} = {best_metric:.4f}, FN+FP = {best_fn_fp}"
-        )
-
-    # Сортировка по метрике по убыванию, далее по fn+fp по возрастанию
-    fold_results = sorted(fold_results, key=lambda x: (-x["metric"], x["fn_fp"]))
-
-    top_k = n_splits // 3  # часть фолдов
-    top_folds = fold_results[:top_k]
-
-    mean_t = np.mean([r["threshold"] for r in top_folds])
-    mean_metric = np.mean([r["metric"] for r in top_folds])
-    mean_fn = np.mean([r["fn"] for r in top_folds])
-    mean_fp = np.mean([r["fp"] for r in top_folds])
-
-    print(
-        f"\nФинальный threshold = {mean_t:.3f} → {metric} = {mean_metric:.4f}, средние FN = {mean_fn:.1f}, FP = {mean_fp:.1f} (по top-{top_k} фолдам)"
-    )
-    return mean_t, mean_metric, mean_fn, mean_fp
-
-
 def custom_cv_score(model, X, y, threshold, n_splits=N_SPLITS, metric=METRIC):
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
     scores = []
@@ -268,7 +184,7 @@ def split_df(data):
         raise
 
 
-def objective(trial, X_train, y_train, threshold):
+def objective(trial, X_train, y_train):
     try:
         counter = Counter(y_train)
         scale_pos_weight = counter[0] / counter[1]
@@ -279,8 +195,8 @@ def objective(trial, X_train, y_train, threshold):
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3),
             "subsample": trial.suggest_float("subsample", 0.2, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.2, 1.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 1.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 1.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
             "scale_pos_weight": scale_pos_weight,
             "random_state": RANDOM_STATE,
             "eval_metric": EVAL_METRIC,
@@ -290,6 +206,7 @@ def objective(trial, X_train, y_train, threshold):
 
         recalls, precisions, f1s, accuracies = [], [], [], []
         fn_list, fp_list, tn_list, tp_list = [], [], [], []
+        fold_thresholds = []
 
         for train_idx, valid_idx in skf.split(X_train, y_train):
             model = XGBClassifier(**params)
@@ -298,7 +215,34 @@ def objective(trial, X_train, y_train, threshold):
 
             model.fit(X_tr, y_tr)
             y_proba = model.predict_proba(X_val)[:, 1]
-            y_pred = (y_proba >= threshold).astype(int)
+
+            # Подбор лучшего threshold по выбранной метрике
+            thresholds = np.arange(0.01, 0.91, 0.01)
+            best_score = -np.inf
+            best_threshold = 0.5
+            for t in thresholds:
+                y_pred_t = (y_proba >= t).astype(int)
+                if METRIC == "f1":
+                    score_t = f1_score(y_val, y_pred_t, zero_division=0)
+                elif METRIC == "accuracy":
+                    score_t = accuracy_score(y_val, y_pred_t)
+                elif METRIC == "recall":
+                    score_t = recall_score(y_val, y_pred_t)
+                elif METRIC == "precision":
+                    score_t = precision_score(y_val, y_pred_t, zero_division=0)
+                elif METRIC == "custom":
+                    cm_t = confusion_matrix(y_val, y_pred_t, labels=[0, 1])
+                    tn, fp, fn, tp = cm_t.ravel() if cm_t.shape == (2, 2) else (0, 0, 0, 0)
+                    score_t = custom_metric_from_counts(tp=tp, tn=tn, fn=fn, fp=fp)
+                else:
+                    score_t = recall_score(y_val, y_pred_t)
+
+                if score_t > best_score:
+                    best_score = score_t
+                    best_threshold = t
+                fold_thresholds.append(best_threshold)
+
+            y_pred = (y_proba >= best_threshold).astype(int)
 
             recalls.append(recall_score(y_val, y_pred))
             precisions.append(precision_score(y_val, y_pred, zero_division=0))
@@ -326,7 +270,7 @@ def objective(trial, X_train, y_train, threshold):
         mean_f1 = np.mean(f1s)
         mean_accuracy = np.mean(accuracies)
 
-        # Выбор метрики
+        # Финальный скор по выбранной метрике
         if METRIC == "f1":
             score = mean_f1
         elif METRIC == "accuracy":
@@ -353,6 +297,9 @@ def objective(trial, X_train, y_train, threshold):
             f"FN: {np.mean(fn_list):.1f}, FP: {np.mean(fp_list):.1f}, TN: {np.mean(tn_list):.1f}, TP: {np.mean(tp_list):.1f}"
         )
 
+        final_threshold = np.mean(fold_thresholds)
+        trial.set_user_attr("best_threshold", final_threshold)
+
         return score
 
     except Exception as e:
@@ -370,7 +317,6 @@ def run_optuna_experiment(
     experiment_name,
     model_output_path,
     current_time,
-    global_threshold,
 ):
     try:
         counter = Counter(y_train)
@@ -380,10 +326,11 @@ def run_optuna_experiment(
         mlflow.set_experiment(experiment_name)
 
         def optuna_objective(trial):
-            return objective(trial, X_train, y_train, global_threshold)
+            return objective(trial, X_train, y_train)
 
         study = optuna.create_study(study_name=experiment_name, direction="maximize")
         manual_optuna_progress(study, n_trials, optuna_objective)
+        # best_threshold = study.best_trial.user_attrs["best_threshold"]
 
         best_params = study.best_trial.params
 
@@ -394,8 +341,38 @@ def run_optuna_experiment(
             eval_metric=EVAL_METRIC,
         )
         final_model.fit(X_train, y_train)
+
+        # === VALIDATION SPLIT for THRESHOLD ===
+        X_train_sub, X_val_sub, y_train_sub, y_val_sub = train_test_split(
+            X_train, y_train, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_train
+        )
+        final_model.fit(X_train_sub, y_train_sub)
+        y_val_proba = final_model.predict_proba(X_val_sub)[:, 1]
+
+        # Поиск наилучшего threshold по валидации
+        thresholds = np.arange(0.01, 0.91, 0.01)
+        best_threshold = 0.5
+        best_score = -np.inf
+        for t in thresholds:
+            y_val_pred_t = (y_val_proba >= t).astype(int)
+            if metric == "f1":
+                score_t = f1_score(y_val_sub, y_val_pred_t, zero_division=0)
+            elif metric == "recall":
+                score_t = recall_score(y_val_sub, y_val_pred_t)
+            elif metric == "precision":
+                score_t = precision_score(y_val_sub, y_val_pred_t, zero_division=0)
+            elif metric == "custom":
+                cm = confusion_matrix(y_val_sub, y_val_pred_t, labels=[0, 1])
+                tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
+                score_t = custom_metric_from_counts(tp=tp, tn=tn, fn=fn, fp=fp)
+            else:
+                score_t = f1_score(y_val_sub, y_val_pred_t, zero_division=0)
+            if score_t > best_score:
+                best_score = score_t
+                best_threshold = t
+
         y_pred_proba = final_model.predict_proba(X_test)[:, 1]
-        y_pred = (y_pred_proba >= global_threshold).astype(int)
+        y_pred = (y_pred_proba >= best_threshold).astype(int)
         recall = recall_score(y_test, y_pred)
         precision = precision_score(y_test, y_pred)
         cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
@@ -433,7 +410,7 @@ def run_optuna_experiment(
             joblib.dump(
                 {
                     "model": final_model,
-                    "threshold": global_threshold,
+                    "threshold": best_threshold,
                     "metrics": final_metrics,
                 },
                 model_output_path,
@@ -445,7 +422,7 @@ def run_optuna_experiment(
 
         # Метрики на трейне
         y_pred_proba_train = final_model.predict_proba(X_train)[:, 1]
-        y_pred_train = (y_pred_proba_train >= global_threshold).astype(int)
+        y_pred_train = (y_pred_proba_train >= best_threshold).astype(int)
         recall_train = recall_score(y_train, y_pred_train)
         precision_train = precision_score(y_train, y_pred_train)
         cm_train = confusion_matrix(y_train, y_pred_train, labels=[0, 1])
@@ -471,7 +448,7 @@ def run_optuna_experiment(
             mlflow.log_param("random_state", RANDOM_STATE)
             mlflow.log_param("n_trials", n_trials)
             mlflow.log_param("model_type", "XGBoostClassifier")
-            mlflow.log_param("threshold", round(global_threshold, 4))
+            mlflow.log_param("threshold", round(best_threshold, 4))
 
             mlflow.log_param("opt_metric", f"{METRIC}")
 
@@ -542,10 +519,10 @@ def run_optuna_experiment(
             plt.plot(thresholds, precisions, label="Precision")
             plt.plot(thresholds, recalls, label="Recall")
             plt.axvline(
-                global_threshold,
+                float(best_threshold),
                 color="gray",
                 linestyle="--",
-                label=f"Threshold = {round(global_threshold, 3)}",
+                label=f"Threshold = {round(best_threshold, 3)}",
             )
             plt.xlabel("Threshold")
             plt.ylabel("Score")
@@ -562,10 +539,10 @@ def run_optuna_experiment(
             plt.figure(figsize=(8, 6))
             plt.hist(y_pred_proba, bins=50, alpha=0.7)
             plt.axvline(
-                global_threshold,
+                float(best_threshold),
                 color="red",
                 linestyle="--",
-                label=f"Threshold = {round(global_threshold, 3)}",
+                label=f"Threshold = {round(best_threshold, 3)}",
             )
             plt.title("Distribution of predicted probabilities")
             plt.xlabel("Probability")
@@ -618,14 +595,6 @@ if __name__ == "__main__":
         eval_metric=EVAL_METRIC,
     )
 
-    global_threshold_main, f1, fn, fp = cross_val_best_threshold(
-        base_model_main, X_main, y_main, metric=METRIC
-    )
-
-    print(
-        f"Выбранный threshold для all = {global_threshold_main:.3f}, f1 = {f1:.4f}, fn = {fn:.4f}, fp = {fp:.4f}"
-    )
-
     X_train_main, X_test_main, y_train_main, y_test_main = train_test_split(
         X_main, y_main, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_main
     )
@@ -640,7 +609,6 @@ if __name__ == "__main__":
         experiment_name=MLFLOW_EXPERIMENT_MAIN,
         model_output_path=f"{MODELS}/xgb_main_users.pkl",
         current_time=today(),
-        global_threshold=global_threshold_main,
     )
 
     # --- TOP USERS ---
@@ -648,14 +616,6 @@ if __name__ == "__main__":
         scale_pos_weight=Counter(y_top)[0] / Counter(y_top)[1],
         random_state=RANDOM_STATE,
         eval_metric=EVAL_METRIC,
-    )
-
-    global_threshold_top, f1, fn, fp = cross_val_best_threshold(
-        base_model_top, X_top, y_top, metric=METRIC
-    )
-
-    print(
-        f"Выбранный threshold для top = {global_threshold_top:.3f}, f1 = {f1:.4f}, fn = {fn:.4f}, fp = {fp:.4f}"
     )
 
     X_train_top, X_test_top, y_train_top, y_test_top = train_test_split(
@@ -672,5 +632,4 @@ if __name__ == "__main__":
         experiment_name=MLFLOW_EXPERIMENT_TOP,
         model_output_path=f"{MODELS}/xgb_top_users.pkl",
         current_time=today(),
-        global_threshold=global_threshold_top,
     )
