@@ -43,10 +43,10 @@ os.makedirs(MODELS, exist_ok=True)
 INPUT_FILE_MAIN_USERS = f"{DATA_PROCESSED}/main_users_for_train.csv"
 INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
-TEST_SIZE = 0.3
+TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 200  # итерации для оптуны
-N_SPLITS = 10  # число кроссвалидаций
+N_TRIALS = 100  # итерации для оптуны
+N_SPLITS = 5  # число кроссвалидаций
 METRIC = "custom"
 EVAL_METRIC = "logloss"
 MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
@@ -62,7 +62,7 @@ top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
 def custom_metric_from_counts(tp, tn, fn, fp):
-    fn_weight = 3.0
+    fn_weight = 4.0
     fp_weight = 0.5
 
     total = tp + tn + fn + fp
@@ -201,8 +201,8 @@ def objective(trial, X_train, y_train):
         scale_pos_weight = counter[0] / counter[1]
 
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 10, 400),
-            "max_depth": trial.suggest_int("max_depth", 2, 10),
+            "n_estimators": trial.suggest_int("n_estimators", 10, 100),
+            "max_depth": trial.suggest_int("max_depth", 2, 5),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3),
             "subsample": trial.suggest_float("subsample", 0.2, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.2, 1.0),
