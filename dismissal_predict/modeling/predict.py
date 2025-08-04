@@ -24,8 +24,8 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 INPUT_FILE_MAIN_ALL = os.path.join(DATA_PROCESSED, "main_all.csv")
 INPUT_FILE_MAIN_TOP = os.path.join(DATA_PROCESSED, "main_top.csv")
 INPUT_FILE_CADR = os.path.join(DATA_INTERIM, "check_last_users_update.csv")
-MODEL_MAIN = os.path.join(MODELS_DIR, "xgb_main_users.pkl")
-MODEL_TOP = os.path.join(MODELS_DIR, "xgb_top_users.pkl")
+MODEL_MAIN = os.path.join(MODELS_DIR, "main_users.pkl")
+MODEL_TOP = os.path.join(MODELS_DIR, "top_users.pkl")
 PREPROCESSOR_MAIN_PATH = os.path.join(DATA_PROCESSED, "preprocessor")
 PREPROCESSOR_TOP_PATH = os.path.join(DATA_PROCESSED, "preprocessor_top")
 
@@ -100,13 +100,16 @@ def add_predictions_to_excel(original_df, model, threshold, result_file, preproc
         if not features:
             features = list(predict_clean.columns)
 
-        # Проверка согласованности
-        if shap_values.values.shape[1] != len(features):
-            raise ValueError(
-                f"Количество признаков в SHAP ({shap_values.values.shape[1]}) не совпадает с features ({len(features)})"
-            )
+        # Обработка SHAP значений для модели с вероятностями
+        if shap_values.values.ndim == 3:
+            # Если 3D — берём SHAP для класса 1
+            shap_vals_for_class1 = shap_values.values[:, :, 1]
+        elif shap_values.values.ndim == 2:
+            shap_vals_for_class1 = shap_values.values
+        else:
+            raise ValueError(f"Неожиданный формат SHAP-значений: ndim={shap_values.values.ndim}")
 
-        shap_df = pd.DataFrame(shap_values.values, columns=features)
+        shap_df = pd.DataFrame(shap_vals_for_class1, columns=features)
         shap_df.insert(0, "фио", predict_df["фио"].values)
 
         shap_path = result_file.replace(".xlsx", "_shap.csv")

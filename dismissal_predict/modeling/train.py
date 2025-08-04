@@ -12,6 +12,7 @@ import numpy as np
 import optuna
 import pandas as pd
 import shap  # type: ignore
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.exceptions import UndefinedMetricWarning
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
@@ -26,7 +27,6 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from tqdm import tqdm
-from xgboost import XGBClassifier
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,15 +45,16 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 100  # итерации для оптуны
+N_TRIALS = 300  # итерации для оптуны
 N_SPLITS = 5  # число кроссвалидаций
 METRIC = "custom"
-EVAL_METRIC = "logloss"
-MLFLOW_EXPERIMENT_MAIN = "xgboost_main_users"
-MLFLOW_EXPERIMENT_TOP = "xgboost_top_users"
+MLFLOW_EXPERIMENT_MAIN = "main_users"
+MLFLOW_EXPERIMENT_TOP = "top_users"
 
 TARGET_COL = "уволен"
 
+N_JOBS = 8
+THRESHOLDS = np.arange(0.1, 0.9, 0.001)
 
 warnings.filterwarnings("ignore")
 
@@ -61,22 +62,12 @@ main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
-def custom_metric_from_counts(tp, tn, fn, fp):
-    fn_weight = 4.0
-    fp_weight = 0.5
+def custom_metric_from_counts(tp, tn, fn, fp, fn_hard_limit=5, alpha=0.8, beta=0.2):
+    fn_penalty = 1.0 / (1.0 + fn / fn_hard_limit)
+    fp_penalty = np.exp(-fp / (tn + 1e-6))
 
-    total = tp + tn + fn + fp
-    if total == 0:
-        return 0.0
-
-    # Нормализуем: минимально возможный score (все ошибки) и максимально возможный (всё правильно)
-    raw_score = (tp + tn) - fn_weight * fn - fp_weight * fp
-    max_score = total  # если все предсказания верны → tp + tn = total
-    min_score = -(fn_weight + fp_weight) * total / 2  # worst case approximation
-
-    # Приводим к [0, 1]
-    norm_score = (raw_score - min_score) / (max_score - min_score)
-    return max(0.0, min(1.0, norm_score))
+    score = alpha * fn_penalty + beta * fp_penalty
+    return max(0.0, min(1.0, score))
 
 
 def is_new_model_better(new_metrics, old_metrics, delta=0.001):
@@ -110,7 +101,7 @@ def is_new_model_better(new_metrics, old_metrics, delta=0.001):
 
 def manual_optuna_progress(study, n_trials, func):
     for _ in tqdm(range(n_trials), desc="Optuna Tuning"):
-        study.optimize(func, n_trials=1, catch=(Exception,), n_jobs=4)
+        study.optimize(func, n_trials=1, catch=(Exception,), n_jobs=N_JOBS)
 
 
 def convert_all_to_float(df: pd.DataFrame, exclude_cols=None):
@@ -180,37 +171,24 @@ def custom_cv_score(model, X, y, threshold, n_splits=N_SPLITS, metric=METRIC):
     return np.mean(scores) if scores else float("nan")
 
 
-def split_df(data):
-    try:
-        X_train, X_test, y_train, y_test = train_test_split(
-            data.drop([TARGET_COL], axis=1),
-            data[TARGET_COL],
-            test_size=TEST_SIZE,
-            random_state=RANDOM_STATE,
-            stratify=data[TARGET_COL],
-        )
-        return X_train, X_test, y_train, y_test
-    except Exception as e:
-        logger.info(f"Ошибка: {e}")
-        raise
-
-
 def objective(trial, X_train, y_train):
     try:
-        counter = Counter(y_train)
-        scale_pos_weight = counter[0] / counter[1]
-
+        bootstrap = trial.suggest_categorical("bootstrap", [True, False])
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 10, 100),
-            "max_depth": trial.suggest_int("max_depth", 2, 5),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3),
-            "subsample": trial.suggest_float("subsample", 0.2, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.2, 1.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 1.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
-            "scale_pos_weight": scale_pos_weight,
+            "n_estimators": trial.suggest_int("n_estimators", 100, 1000),
+            "max_depth": trial.suggest_int("max_depth", 2, 20),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 5),
+            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2", None]),
+            "criterion": trial.suggest_categorical("criterion", ["gini", "entropy", "log_loss"]),
+            "bootstrap": bootstrap,
+            "max_samples": trial.suggest_float("max_samples", 0.5, 1.0) if bootstrap else None,
+            "oob_score": (
+                trial.suggest_categorical("oob_score", [True, False]) if bootstrap else False
+            ),
+            "class_weight": "balanced",
             "random_state": RANDOM_STATE,
-            "eval_metric": EVAL_METRIC,
+            "n_jobs": N_JOBS,
         }
 
         skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
@@ -220,7 +198,7 @@ def objective(trial, X_train, y_train):
         fold_thresholds = []
 
         for train_idx, valid_idx in skf.split(X_train, y_train):
-            model = XGBClassifier(**params)
+            model = RandomForestClassifier(**params)
             X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[valid_idx]
             y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[valid_idx]
 
@@ -228,17 +206,16 @@ def objective(trial, X_train, y_train):
             y_proba = model.predict_proba(X_val)[:, 1]
 
             # Подбор threshold с учетом FN <= FP
-            thresholds = np.arange(0.01, 0.91, 0.01)
             best_score = -np.inf
             best_threshold = 0.5
 
-            for t in thresholds:
+            for t in THRESHOLDS:
                 y_pred_t = (y_proba >= t).astype(int)
                 cm_t = confusion_matrix(y_val, y_pred_t, labels=[0, 1])
                 tn, fp, fn, tp = cm_t.ravel() if cm_t.shape == (2, 2) else (0, 0, 0, 0)
 
-                # Условие: FN должно быть меньше или равно FP
-                if fn > fp:
+                precision_t = precision_score(y_val, y_pred_t, zero_division=0)
+                if fn > 20 or precision_t < 0.5:
                     continue
 
                 # Выбор метрики
@@ -337,8 +314,6 @@ def run_optuna_experiment(
     current_time,
 ):
     try:
-        counter = Counter(y_train)
-        scale_pos_weight = counter[0] / counter[1]
         logger.info(f"Tracking URI: {mlflow.get_tracking_uri()}")
         logger.info(f"Experiment: {experiment_name}")
         mlflow.set_experiment(experiment_name)
@@ -352,11 +327,11 @@ def run_optuna_experiment(
 
         best_params = study.best_trial.params
 
-        final_model = XGBClassifier(
+        final_model = RandomForestClassifier(
             **best_params,
-            scale_pos_weight=scale_pos_weight,
             random_state=RANDOM_STATE,
-            eval_metric=EVAL_METRIC,
+            n_jobs=N_JOBS,
+            class_weight="balanced",
         )
         final_model.fit(X_train, y_train)
 
@@ -368,11 +343,13 @@ def run_optuna_experiment(
         y_val_proba = final_model.predict_proba(X_val_sub)[:, 1]
 
         # Поиск наилучшего threshold по валидации
-        thresholds = np.arange(0.01, 0.91, 0.01)
         best_threshold = 0.5
         best_score = -np.inf
-        for t in thresholds:
+        for t in THRESHOLDS:
             y_val_pred_t = (y_val_proba >= t).astype(int)
+            precision_t = precision_score(y_val_sub, y_val_pred_t, zero_division=0)
+            if precision_t < 0.5:
+                continue
             if metric == "f1":
                 score_t = f1_score(y_val_sub, y_val_pred_t, zero_division=0)
             elif metric == "recall":
@@ -397,7 +374,7 @@ def run_optuna_experiment(
         tp = tn = fp = fn = 0
         if cm.shape == (2, 2):
             tn, fp, fn, tp = cm.ravel()
-
+        logger.info(f"FINAL TEST → TP: {tp}, TN: {tn}, FP: {fp}, FN: {fn}")
         final_metrics = {
             "accuracy": accuracy_score(y_test, y_pred),
             "precision": precision,
@@ -466,7 +443,7 @@ def run_optuna_experiment(
             mlflow.log_param("random_state", RANDOM_STATE)
             mlflow.log_param("n_trials", n_trials)
             mlflow.log_param("n_splits", N_SPLITS)
-            mlflow.log_param("model_type", "XGBoostClassifier")
+            mlflow.log_param("model_type", "RandomForestClassifier")
             mlflow.log_param("threshold", round(best_threshold, 4))
 
             mlflow.log_param("opt_metric", f"{METRIC}")
@@ -510,21 +487,32 @@ def run_optuna_experiment(
             mlflow.log_artifact("roc_curve.png")
             os.remove("roc_curve.png")
 
-            # SHAP summary
-            explainer = shap.Explainer(final_model)
-            shap_values = explainer(X_test)
-            plt.figure()  # важно!
-            shap.summary_plot(shap_values, X_test, plot_type="dot", show=False)
+            # SHAP
+            if hasattr(final_model, "feature_names_in_"):
+                X_test = X_test[final_model.feature_names_in_]
+
+            explainer = shap.Explainer(final_model, X_test)
+            shap_values = explainer(
+                X_test, check_additivity=False
+            )  # Отключаем проверку аддитивности
+
+            # Берем SHAP только для класса 1 (предположительно "уволится")
+            shap_class_1 = shap_values.values[:, :, 1]
+
+            # Строим dot plot
+            plt.figure()
+            shap.summary_plot(shap_class_1, X_test, plot_type="dot", show=False, max_display=39)
             plt.tight_layout()
             plt.savefig("shap_dot_plot.png")
             plt.close()
+
+            # Логгируем артефакт в MLflow
             mlflow.log_artifact("shap_dot_plot.png")
             os.remove("shap_dot_plot.png")
 
             # Threshold vs metrics
-            thresholds = np.arange(0.1, 0.9, 0.01)
             f1s, precisions, recalls = [], [], []
-            for t in thresholds:
+            for t in THRESHOLDS:
                 y_pred_temp = (y_pred_proba >= t).astype(int)
                 p, r, f1, _ = precision_recall_fscore_support(
                     y_test, y_pred_temp, average="binary", zero_division=0
@@ -534,9 +522,9 @@ def run_optuna_experiment(
                 recalls.append(r)
 
             plt.figure(figsize=(8, 6))
-            plt.plot(thresholds, f1s, label="F1")
-            plt.plot(thresholds, precisions, label="Precision")
-            plt.plot(thresholds, recalls, label="Recall")
+            plt.plot(THRESHOLDS, f1s, label="F1")
+            plt.plot(THRESHOLDS, precisions, label="Precision")
+            plt.plot(THRESHOLDS, recalls, label="Recall")
             plt.axvline(
                 float(best_threshold),
                 color="gray",
@@ -574,6 +562,40 @@ def run_optuna_experiment(
             mlflow.log_artifact("proba_distribution.png")
             os.remove("proba_distribution.png")
 
+            # TP/FP/FN/TN vs Threshold plot
+            tps, fps, fns, tns = [], [], [], []
+
+            for t in THRESHOLDS:
+                y_pred_temp = (y_pred_proba >= t).astype(int)
+                cm_temp = confusion_matrix(y_test, y_pred_temp, labels=[0, 1])
+                tn, fp, fn, tp = cm_temp.ravel() if cm_temp.shape == (2, 2) else (0, 0, 0, 0)
+                tps.append(tp)
+                fps.append(fp)
+                fns.append(fn)
+                tns.append(tn)
+
+            plt.figure(figsize=(8, 6))
+            plt.plot(THRESHOLDS, tps, label="TP")
+            plt.plot(THRESHOLDS, fps, label="FP")
+            plt.plot(THRESHOLDS, fns, label="FN")
+            plt.plot(THRESHOLDS, tns, label="TN")
+            plt.axvline(
+                float(best_threshold),
+                color="gray",
+                linestyle="--",
+                label=f"Threshold = {round(best_threshold, 3)}",
+            )
+            plt.xlabel("Threshold")
+            plt.ylabel("Count")
+            plt.title("TP / FP / FN / TN vs Threshold")
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig("threshold_confusion_counts.png")
+            plt.close()
+            mlflow.log_artifact("threshold_confusion_counts.png")
+            os.remove("threshold_confusion_counts.png")
+
     except Exception as e:
         logger.info(f"Ошибка: {e}")
         raise
@@ -607,13 +629,6 @@ if __name__ == "__main__":
     X_top = top_users.drop(columns=[TARGET_COL])
     y_top = top_users[TARGET_COL]
 
-    # --- MAIN USERS ---
-    base_model_main = XGBClassifier(
-        scale_pos_weight=Counter(y_main)[0] / Counter(y_main)[1],
-        random_state=RANDOM_STATE,
-        eval_metric=EVAL_METRIC,
-    )
-
     X_train_main, X_test_main, y_train_main, y_test_main = train_test_split(
         X_main, y_main, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_main
     )
@@ -626,15 +641,8 @@ if __name__ == "__main__":
         metric=METRIC,
         n_trials=N_TRIALS,
         experiment_name=MLFLOW_EXPERIMENT_MAIN,
-        model_output_path=f"{MODELS}/xgb_main_users.pkl",
+        model_output_path=f"{MODELS}/main_users.pkl",
         current_time=today(),
-    )
-
-    # --- TOP USERS ---
-    base_model_top = XGBClassifier(
-        scale_pos_weight=Counter(y_top)[0] / Counter(y_top)[1],
-        random_state=RANDOM_STATE,
-        eval_metric=EVAL_METRIC,
     )
 
     X_train_top, X_test_top, y_train_top, y_test_top = train_test_split(
@@ -649,6 +657,6 @@ if __name__ == "__main__":
         metric=METRIC,
         n_trials=N_TRIALS,
         experiment_name=MLFLOW_EXPERIMENT_TOP,
-        model_output_path=f"{MODELS}/xgb_top_users.pkl",
+        model_output_path=f"{MODELS}/top_users.pkl",
         current_time=today(),
     )

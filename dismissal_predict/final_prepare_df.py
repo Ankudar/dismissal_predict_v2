@@ -1,5 +1,6 @@
 from datetime import datetime
 import logging
+import os
 
 import joblib
 import matplotlib.pyplot as plt
@@ -42,6 +43,7 @@ DROP_COLS = [
     "уровень_зп",
     "грейд",
     "id_руководителя",
+    "зп_на_ср_зп_по_компании",
 ]
 
 FLOAT_COLS = ["тон", "увольнение", "оффер", "вредительство", "личная жизнь", "стресс", "конфликты"]
@@ -418,13 +420,16 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users["зп_на_ср_зп_по_компании"] = main_users["ср_зп"] / mean_salary
         main_users["не_доплачивают"] = (main_users["зп_на_ср_зп_по_компании"] < 0.8).astype(int)
 
-        main_users["стаж_на_возраст"] = main_users["стаж"] / main_users["возраст"]
         main_users["зп_на_число_детей"] = main_users["ср_зп"] / main_users["число_детей"].replace(
             0, np.nan
         )
         main_users["недоплата_и_больше_2_детей"] = (
             (main_users["не_доплачивают"] == 1) & (main_users["число_детей"] >= 2)
         ).astype(int)
+
+        main_users["зп_к_возрасту"] = main_users["ср_зп"] / (main_users["возраст"] + 1)
+        main_users["зп_к_стажу"] = main_users["ср_зп"] / (main_users["стаж"] + 1)
+        main_users["стаж_к_возрасту"] = main_users["стаж"] / (main_users["возраст"] + 1)
 
         # --- Сохранение ---
         main_users.to_csv(f"{DATA_PROCESSED}/main_all.csv", index=False)
@@ -476,6 +481,45 @@ def prepare_with_mic():
     )
 
 
+def calc_target_correlations(df, target_col: str = "уволен", file_path: str = "data.csv"):
+    """
+    Считает корреляцию каждого признака с таргетом через pandas.corr(),
+    предварительно кодируя категориальные признаки в целые числа .cat.codes.
+    """
+    folder = os.path.dirname(file_path)
+    base = os.path.splitext(os.path.basename(file_path))[0]
+
+    print(f"\n=== Target correlation report for: {file_path}  (target: {target_col}) ===")
+
+    # Копия, чтобы не портить исходный df
+    df_tmp = df.copy()
+
+    # Кодируем категориальные и object признаки в числовые
+    cat_cols = df_tmp.select_dtypes(include=["object", "category"]).columns
+    for c in cat_cols:
+        df_tmp[c] = df_tmp[c].astype("category").cat.codes
+
+    # теперь все числовые
+    numeric_cols = df_tmp.select_dtypes(exclude=["object", "category"]).columns.tolist()
+    if target_col not in numeric_cols:
+        raise ValueError(
+            f"Таргет {target_col} должен быть числовым (или приведён), чтобы посчитать корреляцию"
+        )
+
+    corr_df = (
+        df_tmp[numeric_cols]
+        .corr()[target_col]
+        .drop(target_col)
+        .sort_values(key=np.abs, ascending=False)
+    )
+
+    # Сохраняем
+    pearson_path = os.path.join(folder, f"{base}_pearson_target_corr.csv")
+    corr_df.to_csv(pearson_path)
+    print(f"Pearson correlations saved → {pearson_path}")
+    return corr_df
+
+
 def run_all():
     main_prepare_for_all(main_users, users_salary, users_cadr, children)
     prepare_with_mic()
@@ -484,4 +528,11 @@ def run_all():
 if __name__ == "__main__":
     logger.info("Финальная подготовка баз началась")
     run_all()
+    main_all = pd.read_csv(f"{DATA_PROCESSED}/main_all.csv", delimiter=",", decimal=",")
+    corr = calc_target_correlations(
+        main_all,
+        target_col="уволен",
+        file_path=f"{DATA_PROCESSED}/main_all.csv",
+    )
+
     logger.info("Финальная подготовка баз завершилась")
