@@ -9,11 +9,12 @@ import pandas as pd
 from rusgenderdetection import get_gender  # type: ignore
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import (
-    LabelEncoder,
     OneHotEncoder,
     OrdinalEncoder,
     RobustScaler,
+    StandardScaler,
 )
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,8 +43,10 @@ DROP_COLS = [
     "отдел",
     "уровень_зп",
     "грейд",
+    "число_детей",
     "id_руководителя",
-    "зп_на_ср_зп_по_компании",
+    "ср_зп",
+    "не_доплачивают"
 ]
 
 FLOAT_COLS = ["тон", "увольнение", "оффер", "вредительство", "личная жизнь", "стресс", "конфликты"]
@@ -118,7 +121,7 @@ class DataPreprocessor:
     def load(path: str):
         return joblib.load(path)
 
-    def drop_trash_feature(self, df, threshold=0.9):
+    def drop_trash_feature(self, df, threshold=0.8):
         high_nan_cols = df.columns[df.isnull().mean() > threshold].tolist()
         if high_nan_cols:
             print(f"Удалены признаки с большим % NaN: {high_nan_cols}")
@@ -168,10 +171,12 @@ class DataPreprocessor:
 
         df = self._handle_nans(df)
 
-        onehot_cols = [col for col in self.cat_cols if df[col].nunique() <= 15]
-        ordinal_cols = [col for col in self.cat_cols if df[col].nunique() >= 16]
+        onehot_cols = [col for col in self.cat_cols if df[col].nunique() <= 20]
+        ordinal_cols = [col for col in self.cat_cols if df[col].nunique() >= 21]
 
-        self.onehot_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+        self.onehot_encoder = OneHotEncoder(
+            handle_unknown="ignore", sparse_output=False  # , drop="first"
+        )
         self.ordinal_encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
 
         self.preprocessor = ColumnTransformer(
@@ -209,12 +214,6 @@ class DataPreprocessor:
         if "уволен" in df.columns:
             df = df.drop(columns=["уволен"])
 
-        # Обработка категориальных
-        # for col in self.cat_cols:
-        #     if col not in df.columns:
-        #         df[col] = "other"
-        #     df[col] = df[col].astype(str).fillna("other")
-
         df = self._handle_nans(df)
 
         # Применяем препроцессор
@@ -242,12 +241,10 @@ def merge_base(bases, index, merge_type):
 
 
 def merge_fillna(left_df, right_df, on="фио"):
-    # Сливаем по ключу
     merged = pd.merge(left_df, right_df, on=on, how="outer", suffixes=("_left", "_right"))
 
     result = merged[[on]].copy()
 
-    # Обрабатываем все колонки, кроме ключа
     for col in left_df.columns:
         if col == on:
             continue
@@ -256,7 +253,6 @@ def merge_fillna(left_df, right_df, on="фио"):
         col_right = f"{col}_right"
 
         if col_left in merged.columns and col_right in merged.columns:
-            # Если есть оба — заполняем пропуски значениями из правого
             result[col] = merged[col_left].combine_first(merged[col_right])
         elif col_left in merged.columns:
             result[col] = merged[col_left]
@@ -292,7 +288,6 @@ def convert_dates(df):
 
 
 def extract_first_name(full_name):
-    # Проверка на NaN
     if pd.isna(full_name):
         return ""
     parts = full_name.split()
@@ -316,7 +311,6 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
     try:
         today = pd.to_datetime(datetime.now().date())
 
-        # --- Обработка детей ---
         children["date_birth"] = pd.to_datetime(
             children["date_birth"], format="%d.%m.%Y", errors="coerce"
         )
@@ -333,12 +327,10 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
             .reset_index()
         )
 
-        # --- Приведение ФИО ---
         for df in [users_salary, users_cadr]:
             df["фио"] = df["фио"].str.split().str[:2].str.join(" ")
         main_users["фио"] = main_users["фамилия"] + " " + main_users["имя"]
 
-        # --- Объединение с историей ---
         users_cadr = merge_fillna(users_cadr, history_cadr, on="фио")
         users_cadr.to_csv(
             INPUT_HISTORY_CADR, index=False, sep=",", decimal=",", encoding="utf-8-sig"
@@ -354,7 +346,6 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
 
         main_users = merge_base([main_users, director], "id", "left")
 
-        # --- Очистка ---
         main_users = main_users[~main_users["логин"].isin(LOGINS_TO_REMOVE)]
         main_users["пол"] = main_users["фио"].apply(determine_gender)
         main_users.replace("nan", pd.NA, inplace=True)
@@ -364,14 +355,17 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         for col in ["логин", "должность", "имя", "фамилия"]:
             main_users[col] = main_users[col].astype(str)
         main_users = main_users[main_users["должность"] != "уборщица"]
+
+        main_users["ср_зп"] = main_users["ср_зп"].fillna(0)
         main_users["ср_зп"] = main_users["ср_зп"].astype(float)
+        main_users = main_users[main_users["ср_зп"] >= 15000]
+
         main_users["уволен"] = main_users["дата_увольнения"].notna().astype(int)
 
         main_users["дата_увольнения"] = pd.to_datetime(
             main_users["дата_увольнения"], errors="coerce"
         )
 
-        # --- Возраст и стаж ---
         main_users["возраст"] = np.where(
             main_users["дата_рождения"].notna(),
             (today - main_users["дата_рождения"]).dt.days // 365,  # type: ignore
@@ -385,18 +379,14 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         )
         main_users["стаж"] = np.maximum(main_users["стаж"], 0)
 
-        # --- Кол-во подчинённых ---
         sub_count = main_users["id_руководителя"].value_counts()
         main_users["подчиненные"] = main_users["id"].apply(lambda x: sub_count.get(x, 0))
 
-        # --- Преобразования ---
-        main_users["id_руководителя"] = main_users["id_руководителя"].fillna(-1).astype(int)
+        main_users["id_руководителя"] = main_users["id_руководителя"].fillna(-1).astype(str)
         main_users["средний_возраст_детей"] = (
             main_users["средний_возраст_детей"].fillna(0).astype(float)
         )
-        main_users["ср_зп"] = main_users["ср_зп"].fillna(0).astype(float)
 
-        # --- Новые признаки ---
         main_users["скоро_др"] = (
             (main_users["дата_рождения"].dt.month == today.month)
             & (abs(main_users["дата_рождения"].dt.day - today.day) <= 30)
@@ -420,9 +410,12 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users["зп_на_ср_зп_по_компании"] = main_users["ср_зп"] / mean_salary
         main_users["не_доплачивают"] = (main_users["зп_на_ср_зп_по_компании"] < 0.8).astype(int)
 
-        main_users["зп_на_число_детей"] = main_users["ср_зп"] / main_users["число_детей"].replace(
-            0, np.nan
+        main_users["зп_на_число_детей"] = np.where(
+            main_users["число_детей"] == 0,
+            main_users["ср_зп"],
+            main_users["ср_зп"] / main_users["число_детей"],
         )
+
         main_users["недоплата_и_больше_2_детей"] = (
             (main_users["не_доплачивают"] == 1) & (main_users["число_детей"] >= 2)
         ).astype(int)
@@ -431,14 +424,13 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users["зп_к_стажу"] = main_users["ср_зп"] / (main_users["стаж"] + 1)
         main_users["стаж_к_возрасту"] = main_users["стаж"] / (main_users["возраст"] + 1)
 
-        # --- Сохранение ---
         main_users.to_csv(f"{DATA_PROCESSED}/main_all.csv", index=False)
 
         preprocessor = DataPreprocessor()
         main_users_for_train = preprocessor.fit(main_users)
 
         main_users_for_train.to_csv(f"{DATA_PROCESSED}/main_users_for_train.csv", index=False)
-        preprocessor.save(f"{DATA_PROCESSED}/preprocessor")
+        preprocessor.save(f"{DATA_PROCESSED}/preprocessor.pkl")
 
         print(
             "NaNs in main_users_for_train:\n",
@@ -455,9 +447,7 @@ def prepare_with_mic():
     main_top = main_top[main_top["логин"].isin(stat["логин"])]
     main_top = main_top[~main_top["логин"].isin(LOGINS_TO_REMOVE)]
 
-    main_top["id_руководителя"] = main_top["id_руководителя"].fillna(-1).astype(int)
     main_top["средний_возраст_детей"] = main_top["средний_возраст_детей"].fillna(0).astype(float)
-    main_top["ср_зп"] = main_top["ср_зп"].fillna(0).astype(float)
 
     for col in FLOAT_COLS:
         if col in main_top.columns:
@@ -466,14 +456,12 @@ def prepare_with_mic():
 
     main_top.to_csv(f"{DATA_PROCESSED}/main_top.csv", index=False)
 
-    # 👉 Новый препроцессор только для main_top
     preprocessor_top = DataPreprocessor()
     main_top_for_train = preprocessor_top.fit(main_top)
 
     main_top_for_train.to_csv(f"{DATA_PROCESSED}/main_top_for_train.csv", index=False)
 
-    # 💾 Сохраним отдельный препроцессор
-    preprocessor_top.save(f"{DATA_PROCESSED}/preprocessor_top")
+    preprocessor_top.save(f"{DATA_PROCESSED}/preprocessor_top.pkl")
 
     print(
         "NaNs in main_top_for_train:\n",
@@ -483,28 +471,21 @@ def prepare_with_mic():
 
 def calc_target_correlations(df, target_col: str = "уволен", file_path: str = "data.csv"):
     """
-    Считает корреляцию каждого признака с таргетом через pandas.corr(),
-    предварительно кодируя категориальные признаки в целые числа .cat.codes.
+    Считает корреляции признаков с таргетом, строит heatmap и рассчитывает VIF.
+    Все результаты сохраняются в виде файлов рядом с file_path.
     """
     folder = os.path.dirname(file_path)
     base = os.path.splitext(os.path.basename(file_path))[0]
 
-    print(f"\n=== Target correlation report for: {file_path}  (target: {target_col}) ===")
-
-    # Копия, чтобы не портить исходный df
     df_tmp = df.copy()
 
-    # Кодируем категориальные и object признаки в числовые
     cat_cols = df_tmp.select_dtypes(include=["object", "category"]).columns
     for c in cat_cols:
         df_tmp[c] = df_tmp[c].astype("category").cat.codes
 
-    # теперь все числовые
     numeric_cols = df_tmp.select_dtypes(exclude=["object", "category"]).columns.tolist()
     if target_col not in numeric_cols:
-        raise ValueError(
-            f"Таргет {target_col} должен быть числовым (или приведён), чтобы посчитать корреляцию"
-        )
+        raise ValueError(f"target_col должен быть числовым")
 
     corr_df = (
         df_tmp[numeric_cols]
@@ -512,12 +493,51 @@ def calc_target_correlations(df, target_col: str = "уволен", file_path: st
         .drop(target_col)
         .sort_values(key=np.abs, ascending=False)
     )
-
-    # Сохраняем
     pearson_path = os.path.join(folder, f"{base}_pearson_target_corr.csv")
     corr_df.to_csv(pearson_path)
-    print(f"Pearson correlations saved → {pearson_path}")
-    return corr_df
+
+    # Исключаем DROP_COLS, но оставляем target_col
+    heatmap_cols = [col for col in numeric_cols if col not in DROP_COLS or col == target_col]
+    corr_matrix = df_tmp[heatmap_cols].corr()
+
+    plt.figure(figsize=(12, 10))
+    plt.imshow(corr_matrix, interpolation="nearest", cmap="coolwarm", aspect="auto")
+    plt.xticks(range(len(corr_matrix.columns)), corr_matrix.columns, rotation=90, fontsize=8)
+    plt.yticks(range(len(corr_matrix.columns)), corr_matrix.columns, fontsize=8)
+    plt.colorbar()
+    plt.title("Correlation Heatmap (включая target)")
+
+    for i in range(corr_matrix.shape[0]):
+        for j in range(corr_matrix.shape[1]):
+            value = corr_matrix.iloc[i, j]
+            plt.text(j, i, f"{value:.2f}", ha="center", va="center", fontsize=6, color="black")
+
+    heatmap_path = os.path.join(folder, f"{base}_features_heatmap.png")
+    plt.tight_layout()
+    plt.savefig(heatmap_path, dpi=300)
+    plt.close()
+
+    # --- VIF ---
+    vif_cols = [col for col in numeric_cols if col != target_col and col not in DROP_COLS]
+    X_vif = df_tmp[vif_cols].copy()
+    scaler = StandardScaler()
+    X_scaled = pd.DataFrame(scaler.fit_transform(X_vif), columns=vif_cols)
+
+    vif_data = pd.DataFrame()
+    vif_data["feature"] = vif_cols
+    vif_data["VIF"] = [
+        variance_inflation_factor(X_scaled.values, i) for i in range(X_scaled.shape[1])
+    ]
+    vif_data = vif_data.sort_values("VIF", ascending=False)
+
+    vif_path = os.path.join(folder, f"{base}_vif.csv")
+    vif_data.to_csv(vif_path, index=False)
+
+    print(f"Target corr saved to:   {pearson_path}")
+    print(f"Heatmap saved to:       {heatmap_path}")
+    print(f"VIF table saved to:     {vif_path}")
+
+    return corr_df, vif_data
 
 
 def run_all():

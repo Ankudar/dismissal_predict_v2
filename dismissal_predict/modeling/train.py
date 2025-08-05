@@ -14,6 +14,7 @@ import pandas as pd
 import shap  # type: ignore
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.exceptions import UndefinedMetricWarning
+from sklearn.feature_selection import SelectKBest, f_classif
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     RocCurveDisplay,
@@ -45,16 +46,16 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 300  # итерации для оптуны
-N_SPLITS = 5  # число кроссвалидаций
+N_TRIALS = 3000  # итерации для оптуны
+N_SPLITS = 10  # число кроссвалидаций
 METRIC = "custom"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
 MLFLOW_EXPERIMENT_TOP = "top_users"
 
 TARGET_COL = "уволен"
 
-N_JOBS = 8
-THRESHOLDS = np.arange(0.1, 0.9, 0.001)
+N_JOBS = -1
+THRESHOLDS = np.arange(0.1, 0.9, 0.01)
 
 warnings.filterwarnings("ignore")
 
@@ -62,11 +63,21 @@ main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
-def custom_metric_from_counts(tp, tn, fn, fp, fn_hard_limit=5, alpha=0.8, beta=0.2):
-    fn_penalty = 1.0 / (1.0 + fn / fn_hard_limit)
+# def custom_metric_from_counts(tp, tn, fn, fp, alpha=0.9, beta=0.1):
+#     fn_log = np.log1p(fn)
+#     fn_penalty = 1.0 / fn_log if fn_log > 0 else 1.0  # максимум — 1.0
+
+#     fp_penalty = np.exp(-fp / (tn + 1e-6))
+
+#     score = alpha * fn_penalty + beta * fp_penalty
+#     return max(0.0, min(1.0, score))
+
+
+def custom_metric_from_counts(tp, tn, fn, fp, fn_weight=0.6, fp_weight=0.4):
+    fn_penalty = np.exp(-fn / 5)
     fp_penalty = np.exp(-fp / (tn + 1e-6))
 
-    score = alpha * fn_penalty + beta * fp_penalty
+    score = fn_weight * fn_penalty + fp_weight * fp_penalty
     return max(0.0, min(1.0, score))
 
 
@@ -171,44 +182,56 @@ def custom_cv_score(model, X, y, threshold, n_splits=N_SPLITS, metric=METRIC):
     return np.mean(scores) if scores else float("nan")
 
 
-def objective(trial, X_train, y_train):
+def objective(trial, X_train, y_train, all_columns):
     try:
-        bootstrap = trial.suggest_categorical("bootstrap", [True, False])
+        k_best = trial.suggest_int("k_best", 5, min(40, X_train.shape[1]))
+        selector = SelectKBest(score_func=f_classif, k=k_best)
+        X_train_sel = selector.fit_transform(X_train, y_train)
+        selected_idx = selector.get_support(indices=True)
+        selected_features = X_train.columns[selected_idx].tolist()
+
+        trial.set_user_attr("selected_features", selected_features)
+        trial.set_user_attr("n_selected_features", len(selected_features))
+
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 100, 1000),
-            "max_depth": trial.suggest_int("max_depth", 2, 20),
-            "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 5),
-            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2", None]),
-            "criterion": trial.suggest_categorical("criterion", ["gini", "entropy", "log_loss"]),
-            "bootstrap": bootstrap,
-            "max_samples": trial.suggest_float("max_samples", 0.5, 1.0) if bootstrap else None,
-            "oob_score": (
-                trial.suggest_categorical("oob_score", [True, False]) if bootstrap else False
+            "n_estimators": trial.suggest_int(name="n_estimators", low=200, high=600, step=50),
+            "max_depth": trial.suggest_int(name="max_depth", low=4, high=15),
+            "min_samples_split": trial.suggest_int(name="min_samples_split", low=2, high=10),
+            "min_samples_leaf": trial.suggest_int(name="min_samples_leaf", low=2, high=6),
+            "min_weight_fraction_leaf": trial.suggest_float(
+                name="min_weight_fraction_leaf", low=0.0, high=0.05
             ),
-            "class_weight": "balanced",
-            "random_state": RANDOM_STATE,
-            "n_jobs": N_JOBS,
+            "max_features": trial.suggest_categorical(
+                name="max_features", choices=["sqrt", "log2"]
+            ),
+            "max_leaf_nodes": trial.suggest_int(name="max_leaf_nodes", low=10, high=50),
+            "criterion": trial.suggest_categorical(
+                name="criterion", choices=["gini", "entropy", "log_loss"]
+            ),
+            "bootstrap": True,
+            "max_samples": trial.suggest_float(name="max_samples", low=0.6, high=0.95),
+            "oob_score": trial.suggest_categorical(name="oob_score", choices=[True, False]),
+            "class_weight": trial.suggest_categorical(
+                name="class_weight", choices=["balanced", "balanced_subsample", None]
+            ),
+            "ccp_alpha": trial.suggest_float(name="ccp_alpha", low=0.0, high=0.01),
         }
 
         skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
-
-        recalls, precisions, f1s, accuracies = [], [], [], []
+        recalls, precisions, f1s, accuracies, roc_auc = [], [], [], [], []
         fn_list, fp_list, tn_list, tp_list = [], [], [], []
         fold_thresholds = []
 
-        for train_idx, valid_idx in skf.split(X_train, y_train):
+        for train_idx, valid_idx in skf.split(X_train_sel, y_train):
             model = RandomForestClassifier(**params)
-            X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[valid_idx]
+            X_tr, X_val = X_train_sel[train_idx], X_train_sel[valid_idx]
             y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[valid_idx]
 
             model.fit(X_tr, y_tr)
             y_proba = model.predict_proba(X_val)[:, 1]
 
-            # Подбор threshold с учетом FN <= FP
             best_score = -np.inf
             best_threshold = 0.5
-
             for t in THRESHOLDS:
                 y_pred_t = (y_proba >= t).astype(int)
                 cm_t = confusion_matrix(y_val, y_pred_t, labels=[0, 1])
@@ -218,7 +241,6 @@ def objective(trial, X_train, y_train):
                 if fn > 20 or precision_t < 0.5:
                     continue
 
-                # Выбор метрики
                 if METRIC == "f1":
                     score_t = f1_score(y_val, y_pred_t, zero_division=0)
                 elif METRIC == "accuracy":
@@ -227,6 +249,8 @@ def objective(trial, X_train, y_train):
                     score_t = recall_score(y_val, y_pred_t)
                 elif METRIC == "precision":
                     score_t = precision_score(y_val, y_pred_t, zero_division=0)
+                elif METRIC == "roc_auc":
+                    score_t = roc_auc_score(y_val, y_proba)
                 elif METRIC == "custom":
                     score_t = custom_metric_from_counts(tp=tp, tn=tn, fn=fn, fp=fp)
                 else:
@@ -239,32 +263,28 @@ def objective(trial, X_train, y_train):
             fold_thresholds.append(best_threshold)
             y_pred = (y_proba >= best_threshold).astype(int)
 
-            # Метрики
             recalls.append(recall_score(y_val, y_pred))
             precisions.append(precision_score(y_val, y_pred, zero_division=0))
             f1s.append(f1_score(y_val, y_pred, zero_division=0))
             accuracies.append(accuracy_score(y_val, y_pred))
+            roc_auc.append(roc_auc_score(y_val, y_pred))
 
             cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
-            tp = tn = fp = fn = 0
-            if cm.shape == (2, 2):
-                tn, fp, fn, tp = cm.ravel()
-            else:
-                tn = cm[0, 0] if cm.shape[0] > 0 and cm.shape[1] > 0 else 0
-                fp = cm[0, 1] if cm.shape[0] > 0 and cm.shape[1] > 1 else 0
-                fn = cm[1, 0] if cm.shape[0] > 1 and cm.shape[1] > 0 else 0
-                tp = cm[1, 1] if cm.shape[0] > 1 and cm.shape[1] > 1 else 0
+            tn = cm[0, 0] if cm.shape[0] > 0 and cm.shape[1] > 0 else 0
+            fp = cm[0, 1] if cm.shape[0] > 0 and cm.shape[1] > 1 else 0
+            fn = cm[1, 0] if cm.shape[0] > 1 and cm.shape[1] > 0 else 0
+            tp = cm[1, 1] if cm.shape[0] > 1 and cm.shape[1] > 1 else 0
 
             fn_list.append(fn)
             fp_list.append(fp)
             tn_list.append(tn)
             tp_list.append(tp)
 
-        # Средние метрики
         mean_recall = np.mean(recalls)
         mean_precision = np.mean(precisions)
         mean_f1 = np.mean(f1s)
         mean_accuracy = np.mean(accuracies)
+        mean_roc_auc = np.mean(roc_auc)
 
         if METRIC == "f1":
             score = mean_f1
@@ -274,6 +294,8 @@ def objective(trial, X_train, y_train):
             score = mean_recall
         elif METRIC == "precision":
             score = mean_precision
+        elif METRIC == "roc_auc":
+            score = mean_roc_auc
         elif METRIC == "custom":
             score = custom_metric_from_counts(
                 tp=int(np.mean(tp_list)),
@@ -286,15 +308,17 @@ def objective(trial, X_train, y_train):
             score = mean_recall
 
         logger.info(
-            f"Trial {trial.number} → "
-            f"Recall: {mean_recall:.3f}, Precision: {mean_precision:.3f}, F1: {mean_f1:.3f}, "
-            f"Accuracy: {mean_accuracy:.3f}, Score: {score:.3f} | "
-            f"FN: {np.mean(fn_list):.1f}, FP: {np.mean(fp_list):.1f}, TN: {np.mean(tn_list):.1f}, TP: {np.mean(tp_list):.1f}"
+            f"\nTrial {trial.number} → k_best: {k_best}\n"
+            f"Recall: {mean_recall:.3f}, Precision: {mean_precision:.3f}, F1: {mean_f1:.3f},\n"
+            f"Accuracy: {mean_accuracy:.3f}, Score: {score:.3f}\n"
+            f"FN: {np.mean(fn_list):.1f}, FP: {np.mean(fp_list):.1f}, TN: {np.mean(tn_list):.1f}, TP: {np.mean(tp_list):.1f}\n"
         )
 
         final_threshold = np.mean(fold_thresholds)
         trial.set_user_attr("best_threshold", final_threshold)
 
+        if np.isnan(score) or np.isinf(score):
+            return -1
         return score
 
     except Exception as e:
@@ -319,30 +343,33 @@ def run_optuna_experiment(
         mlflow.set_experiment(experiment_name)
 
         def optuna_objective(trial):
-            return objective(trial, X_train, y_train)
+            return objective(trial, X_train, y_train, X_train.columns)
 
         study = optuna.create_study(study_name=experiment_name, direction="maximize")
         manual_optuna_progress(study, n_trials, optuna_objective)
-        # best_threshold = study.best_trial.user_attrs["best_threshold"]
 
-        best_params = study.best_trial.params
+        best_params = study.best_trial.params.copy()
+
+        selected_features = study.best_trial.user_attrs["selected_features"]
+        n_selected_features = study.best_trial.user_attrs["n_selected_features"]
+        best_params.pop("k_best", None)
+
+        X_train = X_train[selected_features]
+        X_test = X_test[selected_features]
 
         final_model = RandomForestClassifier(
             **best_params,
             random_state=RANDOM_STATE,
             n_jobs=N_JOBS,
-            class_weight="balanced",
         )
         final_model.fit(X_train, y_train)
 
-        # === VALIDATION SPLIT for THRESHOLD ===
         X_train_sub, X_val_sub, y_train_sub, y_val_sub = train_test_split(
             X_train, y_train, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_train
         )
         final_model.fit(X_train_sub, y_train_sub)
         y_val_proba = final_model.predict_proba(X_val_sub)[:, 1]
 
-        # Поиск наилучшего threshold по валидации
         best_threshold = 0.5
         best_score = -np.inf
         for t in THRESHOLDS:
@@ -356,6 +383,8 @@ def run_optuna_experiment(
                 score_t = recall_score(y_val_sub, y_val_pred_t)
             elif metric == "precision":
                 score_t = precision_score(y_val_sub, y_val_pred_t, zero_division=0)
+            elif metric == "roc_auc":
+                score_t = roc_auc_score(y_val_sub, y_val_proba)
             elif metric == "custom":
                 cm = confusion_matrix(y_val_sub, y_val_pred_t, labels=[0, 1])
                 tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
@@ -371,10 +400,8 @@ def run_optuna_experiment(
         recall = recall_score(y_test, y_pred)
         precision = precision_score(y_test, y_pred)
         cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
-        tp = tn = fp = fn = 0
-        if cm.shape == (2, 2):
-            tn, fp, fn, tp = cm.ravel()
-        logger.info(f"FINAL TEST → TP: {tp}, TN: {tn}, FP: {fp}, FN: {fn}")
+        tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
+
         final_metrics = {
             "accuracy": accuracy_score(y_test, y_pred),
             "precision": precision,
@@ -389,10 +416,22 @@ def run_optuna_experiment(
             try:
                 old_model_bundle = joblib.load(model_output_path)
                 old_metrics = old_model_bundle.get("metrics", {})
-                logger.info(f"Старая модель: {old_metrics}")
-                logger.info(f"Новая модель: {final_metrics}")
-                save_model = is_new_model_better(final_metrics, old_metrics)
+                logger.info(
+                    "Старая модель: "
+                    + ", ".join(
+                        f"{k}: {GREEN + str(v) + RESET}" if k == METRIC else f"{k}: {v}"
+                        for k, v in old_metrics.items()
+                    )
+                )
+                logger.info(
+                    "Новая модель: "
+                    + ", ".join(
+                        f"{k}: {GREEN + str(v) + RESET}" if k == METRIC else f"{k}: {v}"
+                        for k, v in final_metrics.items()
+                    )
+                )
 
+                save_model = is_new_model_better(final_metrics, old_metrics)
                 if save_model:
                     logger.info(f"{GREEN}Новая модель лучше — сохраняем.{RESET}")
                 else:
@@ -407,6 +446,7 @@ def run_optuna_experiment(
                     "model": final_model,
                     "threshold": best_threshold,
                     "metrics": final_metrics,
+                    "selected_features": selected_features,
                 },
                 model_output_path,
             )
@@ -415,7 +455,6 @@ def run_optuna_experiment(
         input_example = pd.DataFrame(X_test[:1], columns=X_test.columns)
         run_name = f"model_{current_time}"
 
-        # Метрики на трейне
         y_pred_proba_train = final_model.predict_proba(X_train)[:, 1]
         y_pred_train = (y_pred_proba_train >= best_threshold).astype(int)
         recall_train = recall_score(y_train, y_pred_train)
@@ -445,6 +484,9 @@ def run_optuna_experiment(
             mlflow.log_param("n_splits", N_SPLITS)
             mlflow.log_param("model_type", "RandomForestClassifier")
             mlflow.log_param("threshold", round(best_threshold, 4))
+            mlflow.log_param(
+                "cv_best_threshold", round(study.best_trial.user_attrs["best_threshold"], 4)
+            )
 
             mlflow.log_param("opt_metric", f"{METRIC}")
 
@@ -463,8 +505,9 @@ def run_optuna_experiment(
             mlflow.log_metric("roc_auc_train", round(final_metrics_train["roc_auc"], 3))
             mlflow.log_metric("roc_auc_test", round(final_metrics["roc_auc"], 3))
 
-            mlflow.log_metric("custom_train", round(final_metrics_train["custom"], 3))
-            mlflow.log_metric("custom_test", round(final_metrics["custom"], 3))
+            mlflow.log_metric("cv_custom_train", round(study.best_value, 4))
+            mlflow.log_metric("custom_train", round(final_metrics_train["custom"], 4))
+            mlflow.log_metric("custom_test", round(final_metrics["custom"], 4))
 
             mlflow.log_artifact(model_output_path)
             mlflow.sklearn.log_model(final_model, name="final_model", input_example=input_example)  # type: ignore
@@ -492,11 +535,9 @@ def run_optuna_experiment(
                 X_test = X_test[final_model.feature_names_in_]
 
             explainer = shap.Explainer(final_model, X_test)
-            shap_values = explainer(
-                X_test, check_additivity=False
-            )  # Отключаем проверку аддитивности
+            shap_values = explainer(X_test, check_additivity=False)
 
-            # Берем SHAP только для класса 1 (предположительно "уволится")
+            # Берем SHAP только для класса 1
             shap_class_1 = shap_values.values[:, :, 1]
 
             # Строим dot plot
@@ -596,6 +637,19 @@ def run_optuna_experiment(
             mlflow.log_artifact("threshold_confusion_counts.png")
             os.remove("threshold_confusion_counts.png")
 
+            selected_features = study.best_trial.user_attrs["selected_features"]
+            n_selected_features = study.best_trial.user_attrs["n_selected_features"]
+
+            # Сохраняем список признаков в текстовый файл
+            selected_features_path = "selected_features.txt"
+            with open(selected_features_path, "w") as f:
+                for feat in selected_features:
+                    f.write(f"{feat}\n")
+
+            mlflow.log_param("n_selected_features", n_selected_features)
+            mlflow.log_artifact(selected_features_path)
+            os.remove(selected_features_path)
+
     except Exception as e:
         logger.info(f"Ошибка: {e}")
         raise
@@ -623,7 +677,6 @@ if __name__ == "__main__":
     main_users = main_users.drop_duplicates()
     top_users = top_users.drop_duplicates()
 
-    # Сплитим данные один раз!
     X_main = main_users.drop(columns=[TARGET_COL])
     y_main = main_users[TARGET_COL]
     X_top = top_users.drop(columns=[TARGET_COL])

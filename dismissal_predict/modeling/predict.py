@@ -26,8 +26,8 @@ INPUT_FILE_MAIN_TOP = os.path.join(DATA_PROCESSED, "main_top.csv")
 INPUT_FILE_CADR = os.path.join(DATA_INTERIM, "check_last_users_update.csv")
 MODEL_MAIN = os.path.join(MODELS_DIR, "main_users.pkl")
 MODEL_TOP = os.path.join(MODELS_DIR, "top_users.pkl")
-PREPROCESSOR_MAIN_PATH = os.path.join(DATA_PROCESSED, "preprocessor")
-PREPROCESSOR_TOP_PATH = os.path.join(DATA_PROCESSED, "preprocessor_top")
+PREPROCESSOR_MAIN_PATH = os.path.join(DATA_PROCESSED, "preprocessor.pkl")
+PREPROCESSOR_TOP_PATH = os.path.join(DATA_PROCESSED, "preprocessor_top.pkl")
 
 # Данные
 df_cadr = pd.read_csv(INPUT_FILE_CADR, delimiter=",", decimal=",")
@@ -37,7 +37,11 @@ df_main_top = pd.read_csv(INPUT_FILE_MAIN_TOP, delimiter=",", decimal=",")
 
 def load_model_and_threshold(model_path):
     model_bundle = joblib.load(model_path)
-    return model_bundle["model"], model_bundle["threshold"], model_bundle.get("features", None)
+    return (
+        model_bundle["model"],
+        model_bundle["threshold"],
+        model_bundle.get("selected_features", None),
+    )
 
 
 def update_results_with_cadr(result_df, main_df):
