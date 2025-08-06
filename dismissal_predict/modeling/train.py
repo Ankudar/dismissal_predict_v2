@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 import logging
 import os
 import warnings
@@ -45,8 +46,8 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 3000  # итерации для оптуны
-N_TRIALS_FOR_TOP = 100
+N_TRIALS = 2  # итерации для оптуны
+N_TRIALS_FOR_TOP = 2
 N_SPLITS = 10  # число кроссвалидаций
 METRIC = "custom"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
@@ -333,14 +334,14 @@ def run_optuna_experiment(
                 logger.info(
                     "Старая модель: "
                     + ", ".join(
-                        f"{k}: {GREEN + str(v) + RESET}" if k == METRIC else f"{k}: {v}"
+                        f"{k}: {GREEN + str(v) + RESET}" if k == metric else f"{k}: {v}"
                         for k, v in old_metrics.items()
                     )
                 )
                 logger.info(
                     "Новая модель: "
                     + ", ".join(
-                        f"{k}: {GREEN + str(v) + RESET}" if k == METRIC else f"{k}: {v}"
+                        f"{k}: {GREEN + str(v) + RESET}" if k == metric else f"{k}: {v}"
                         for k, v in final_metrics.items()
                     )
                 )
@@ -386,6 +387,51 @@ def run_optuna_experiment(
             "custom": custom_metric_from_counts(tp, tn, fn, fp),
         }
 
+        log_with_mlflow(
+            final_model=final_model,
+            metric=metric,
+            best_params=best_params,
+            best_threshold=best_threshold,
+            study=study,
+            X_test=X_test,
+            y_test=y_test,
+            final_metrics=final_metrics,
+            final_metrics_train=final_metrics_train,
+            selected_features=selected_features,
+            model_output_path=model_output_path,
+            run_name=f"model_{current_time}",
+            n_trials=n_trials,
+            input_example=input_example,
+            y_pred_proba=y_pred_proba,
+            y_pred=y_pred,
+        )
+
+    except Exception as e:
+        logger.info(f"Ошибка: {e}")
+        raise
+
+
+def log_with_mlflow(
+    final_model,
+    metric,
+    best_params,
+    best_threshold,
+    study,
+    X_test,
+    y_test,
+    final_metrics,
+    final_metrics_train,
+    selected_features,
+    model_output_path,
+    run_name,
+    n_trials,
+    input_example,
+    y_pred_proba,
+    y_pred,
+):
+    try:
+        n_selected_features = len(selected_features)
+
         if mlflow.active_run():
             mlflow.end_run()
 
@@ -401,7 +447,7 @@ def run_optuna_experiment(
                 "cv_best_threshold", round(study.best_trial.user_attrs["best_threshold"], 4)
             )
 
-            mlflow.log_param("opt_metric", f"{METRIC}")
+            mlflow.log_param("opt_metric", f"{metric}")
 
             mlflow.log_metric("f1_train", round(final_metrics_train["f1"], 3))
             mlflow.log_metric("f1_test", round(final_metrics["f1"], 3))
@@ -595,6 +641,28 @@ def run_optuna_experiment(
 
             mlflow.log_artifact(high_corr_output)
             os.remove(high_corr_output)
+
+            params_path = "best_params.json"
+            with open(params_path, "w") as f:
+                json.dump(best_params, f, indent=4)
+
+            mlflow.log_artifact(params_path)
+            os.remove(params_path)
+
+            experiment_config = {
+                "TEST_SIZE": TEST_SIZE,
+                "RANDOM_STATE": RANDOM_STATE,
+                "N_TRIALS": N_TRIALS,
+                "N_TRIALS_FOR_TOP": N_TRIALS_FOR_TOP,
+                "N_SPLITS": N_SPLITS,
+                "METRIC": METRIC,
+                "TARGET_COL": TARGET_COL,
+            }
+
+            with open("experiment_config.json", "w") as f:
+                json.dump(experiment_config, f, indent=4)
+            mlflow.log_artifact("experiment_config.json")
+            os.remove("experiment_config.json")
 
     except Exception as e:
         logger.info(f"Ошибка: {e}")
