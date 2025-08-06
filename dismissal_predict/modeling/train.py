@@ -44,9 +44,9 @@ os.makedirs(MODELS, exist_ok=True)
 INPUT_FILE_MAIN_USERS = f"{DATA_PROCESSED}/main_users_for_train.csv"
 INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
-TEST_SIZE = 0.2
+TEST_SIZE = 0.3
 RANDOM_STATE = 40
-N_TRIALS = 3000  # итерации для оптуны
+N_TRIALS = 2000  # итерации для оптуны
 N_SPLITS = 10  # число кроссвалидаций
 METRIC = "custom"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
@@ -63,22 +63,13 @@ main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
-# def custom_metric_from_counts(tp, tn, fn, fp, alpha=0.9, beta=0.1):
-#     fn_log = np.log1p(fn)
-#     fn_penalty = 1.0 / fn_log if fn_log > 0 else 1.0  # максимум — 1.0
-
-#     fp_penalty = np.exp(-fp / (tn + 1e-6))
-
-#     score = alpha * fn_penalty + beta * fp_penalty
-#     return max(0.0, min(1.0, score))
-
-
-def custom_metric_from_counts(tp, tn, fn, fp, fn_weight=0.6, fp_weight=0.4):
-    fn_penalty = np.exp(-fn / 5)
-    fp_penalty = np.exp(-fp / (tn + 1e-6))
-
-    score = fn_weight * fn_penalty + fp_weight * fp_penalty
-    return max(0.0, min(1.0, score))
+def custom_metric_from_counts(tp, tn, fn, fp):
+    fn_score = np.exp(-fn / 5)
+    if fn > 0:
+        return fn_score
+    else:
+        fp_score = np.exp(-fp / (tn + 1e-6))
+        return fp_score
 
 
 def is_new_model_better(new_metrics, old_metrics, delta=0.001):
@@ -357,43 +348,15 @@ def run_optuna_experiment(
         X_train = X_train[selected_features]
         X_test = X_test[selected_features]
 
+        best_threshold = study.best_trial.user_attrs["best_threshold"]
+
         final_model = RandomForestClassifier(
             **best_params,
             random_state=RANDOM_STATE,
             n_jobs=N_JOBS,
         )
+
         final_model.fit(X_train, y_train)
-
-        X_train_sub, X_val_sub, y_train_sub, y_val_sub = train_test_split(
-            X_train, y_train, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_train
-        )
-        final_model.fit(X_train_sub, y_train_sub)
-        y_val_proba = final_model.predict_proba(X_val_sub)[:, 1]
-
-        best_threshold = 0.5
-        best_score = -np.inf
-        for t in THRESHOLDS:
-            y_val_pred_t = (y_val_proba >= t).astype(int)
-            precision_t = precision_score(y_val_sub, y_val_pred_t, zero_division=0)
-            if precision_t < 0.5:
-                continue
-            if metric == "f1":
-                score_t = f1_score(y_val_sub, y_val_pred_t, zero_division=0)
-            elif metric == "recall":
-                score_t = recall_score(y_val_sub, y_val_pred_t)
-            elif metric == "precision":
-                score_t = precision_score(y_val_sub, y_val_pred_t, zero_division=0)
-            elif metric == "roc_auc":
-                score_t = roc_auc_score(y_val_sub, y_val_proba)
-            elif metric == "custom":
-                cm = confusion_matrix(y_val_sub, y_val_pred_t, labels=[0, 1])
-                tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
-                score_t = custom_metric_from_counts(tp=tp, tn=tn, fn=fn, fp=fp)
-            else:
-                score_t = f1_score(y_val_sub, y_val_pred_t, zero_division=0)
-            if score_t > best_score:
-                best_score = score_t
-                best_threshold = t
 
         y_pred_proba = final_model.predict_proba(X_test)[:, 1]
         y_pred = (y_pred_proba >= best_threshold).astype(int)
