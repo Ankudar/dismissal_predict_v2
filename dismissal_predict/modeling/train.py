@@ -10,6 +10,7 @@ import mlflow.sklearn
 import numpy as np
 import optuna
 import pandas as pd
+import seaborn as sns
 import shap  # type: ignore
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import SelectKBest, f_classif
@@ -44,7 +45,7 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.3
 RANDOM_STATE = 40
-N_TRIALS = 3000  # итерации для оптуны
+N_TRIALS = 2  # итерации для оптуны
 N_SPLITS = 10  # число кроссвалидаций
 METRIC = "custom"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
@@ -548,10 +549,6 @@ def run_optuna_experiment(
             mlflow.log_artifact("threshold_confusion_counts.png")
             os.remove("threshold_confusion_counts.png")
 
-            # selected_features = study.best_trial.user_attrs["selected_features"]
-            # n_selected_features = study.best_trial.user_attrs["n_selected_features"]
-
-            # Сохраняем список признаков в текстовый файл
             selected_features_path = "selected_features.txt"
             with open(selected_features_path, "w") as f:
                 for feat in selected_features:
@@ -560,6 +557,43 @@ def run_optuna_experiment(
             mlflow.log_param("n_selected_features", n_selected_features)
             mlflow.log_artifact(selected_features_path)
             os.remove(selected_features_path)
+
+            # Correlation heatmap
+            corr_matrix = X_test[selected_features].corr(method="pearson")
+            plt.figure(figsize=(12, 10))
+            sns.heatmap(
+                corr_matrix,
+                annot=True,
+                fmt=".2f",
+                cmap="coolwarm",
+                center=0,
+                square=True,
+                cbar_kws={"shrink": 0.75},
+                linewidths=0.5,
+                linecolor="gray",
+                annot_kws={"size": 6},  # <-- Уменьшенный шрифт аннотаций
+            )
+            plt.title("Correlation Heatmap (Test Data)")
+            plt.tight_layout()
+            plt.savefig("correlation_heatmap.png")
+            plt.close()
+            mlflow.log_artifact("correlation_heatmap.png")
+            os.remove("correlation_heatmap.png")
+
+            # Log high correlation feature pairs (|corr| > 0.9)
+            high_corr_output = "high_corr_pairs.txt"
+            corr_abs = corr_matrix.abs()
+            upper = corr_abs.where(np.triu(np.ones(corr_abs.shape), k=1).astype(bool))
+
+            with open(high_corr_output, "w") as f:
+                for col in upper.columns:
+                    for row in upper.index:
+                        val = upper.loc[row, col]
+                        if pd.notnull(val) and val > 0.9:
+                            f.write(f"{row} - {col}: {val:.3f}\n")
+
+            mlflow.log_artifact(high_corr_output)
+            os.remove(high_corr_output)
 
     except Exception as e:
         logger.info(f"Ошибка: {e}")
@@ -619,7 +653,7 @@ if __name__ == "__main__":
         X_test=X_test_top,
         y_test=y_test_top,
         metric=METRIC,
-        n_trials=N_TRIALS,
+        n_trials=10,
         experiment_name=MLFLOW_EXPERIMENT_TOP,
         model_output_path=f"{MODELS}/top_users.pkl",
         current_time=today(),

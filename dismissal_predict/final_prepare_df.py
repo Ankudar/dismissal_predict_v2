@@ -46,7 +46,7 @@ DROP_COLS = [
     "число_детей",
     "id_руководителя",
     "ср_зп",
-    "не_доплачивают"
+    "не_доплачивают",
 ]
 
 FLOAT_COLS = ["тон", "увольнение", "оффер", "вредительство", "личная жизнь", "стресс", "конфликты"]
@@ -392,7 +392,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
             & (abs(main_users["дата_рождения"].dt.day - today.day) <= 30)
         ).astype(int)
 
-        main_users["скоро_годовщика_приема"] = (
+        main_users["скоро_годовщина_приема"] = (
             (main_users["дата_приема_в_1с"].dt.month == today.month)
             & (abs(main_users["дата_приема_в_1с"].dt.day - today.day) <= 30)
         ).astype(int)
@@ -424,7 +424,12 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         main_users["зп_к_стажу"] = main_users["ср_зп"] / (main_users["стаж"] + 1)
         main_users["стаж_к_возрасту"] = main_users["стаж"] / (main_users["возраст"] + 1)
 
-        main_users.to_csv(f"{DATA_PROCESSED}/main_all.csv", index=False)
+        main_all_path = f"{DATA_PROCESSED}/main_all.csv"
+        main_users_updated = update_existing_data(main_users, main_all_path, id_col="id")
+        main_users_updated.to_csv(main_all_path, index=False)
+        main_users_updated.to_csv(
+            f"{DATA_PROCESSED}/main_all_history_do_not_tuch.csv", index=False
+        )
 
         preprocessor = DataPreprocessor()
         main_users_for_train = preprocessor.fit(main_users)
@@ -454,7 +459,10 @@ def prepare_with_mic():
             main_top[col] = pd.to_numeric(main_top[col], errors="coerce")
             main_top[col] = main_top[col].fillna(main_top[col].median())
 
-    main_top.to_csv(f"{DATA_PROCESSED}/main_top.csv", index=False)
+    main_top_path = f"{DATA_PROCESSED}/main_top.csv"
+    main_top_updated = update_existing_data(main_top, main_top_path, id_col="id")
+    main_top_updated.to_csv(main_top_path, index=False)
+    main_top_updated.to_csv(f"{DATA_PROCESSED}/main_top_history_do_not_tuch.csv", index=False)
 
     preprocessor_top = DataPreprocessor()
     main_top_for_train = preprocessor_top.fit(main_top)
@@ -538,6 +546,53 @@ def calc_target_correlations(df, target_col: str = "уволен", file_path: st
     print(f"VIF table saved to:     {vif_path}")
 
     return corr_df, vif_data
+
+
+def update_existing_data(
+    new_df: pd.DataFrame, existing_path: str, id_col: str = "id"
+) -> pd.DataFrame:
+    if os.path.exists(existing_path):
+        old_df = pd.read_csv(existing_path, delimiter=",", decimal=",")
+
+        # Явное приведение id к строке или int (рекомендуется int, если id — числовой)
+        old_df[id_col] = old_df[id_col].astype(str)
+        new_df[id_col] = new_df[id_col].astype(str)
+
+        # Найдём общие колонки
+        common_cols = sorted(list(set(old_df.columns).intersection(set(new_df.columns))))
+
+        old_df = old_df[common_cols].copy()
+        new_df = new_df[common_cols].copy()
+
+        old_df = old_df.drop_duplicates(subset=[id_col])
+        new_df = new_df.drop_duplicates(subset=[id_col])
+
+        old_df.set_index(id_col, inplace=True)
+        new_df.set_index(id_col, inplace=True)
+
+        old_df = old_df.sort_index().sort_index(axis=1)
+        new_df = new_df.sort_index().sort_index(axis=1)
+
+        # Сравнение
+        common_index = old_df.index.intersection(new_df.index)
+        old_common = old_df.loc[common_index]
+        new_common = new_df.loc[common_index]
+
+        comparison = old_common.fillna("NAN") != new_common.fillna("NAN")
+        changed_mask = comparison.any(axis=1)
+
+        updated_df = old_df.copy()
+        updated_df.update(new_common[changed_mask])
+
+        new_ids = new_df.index.difference(old_df.index)
+        if not new_ids.empty:
+            updated_df = pd.concat([updated_df, new_df.loc[new_ids]])
+
+        updated_df = updated_df.reset_index()
+    else:
+        updated_df = new_df.copy()
+
+    return updated_df
 
 
 def run_all():

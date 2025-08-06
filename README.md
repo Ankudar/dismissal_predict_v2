@@ -11,7 +11,7 @@
 <h2>🧩 Стек технологий</h2>
 <ul>
   <li><strong>Язык:</strong> Python 3.10+</li>
-  <li><strong>ML:</strong> pandas, scikit-learn, xgboost, optuna</li>
+  <li><strong>ML:</strong> pandas, scikit-learn, randomforest, optuna</li>
   <li><strong>Мониторинг:</strong> MLflow</li>
   <li><strong>Оркестрация:</strong> Airflow</li>
 </ul>
@@ -21,7 +21,7 @@
   <li><strong>Сбор данных:</strong> загрузка из ZUP, сохранение в <code>data/raw/zup</code></li>
   <li><strong>Предобработка:</strong> очистка, извлечение признаков, определение пола</li>
   <li><strong>Финальный датасет:</strong> кодирование, выбор признаков, формирование <code>target</code></li>
-  <li><strong>Обучение:</strong> XGBoost + Optuna</li>
+  <li><strong>Обучение:</strong> randomforest + Optuna</li>
   <li><strong>Оценка:</strong> метрики <code>accuracy</code>, <code>ROC-AUC</code>, <code>F1</code>, <code>SHAP</code></li>
   <li><strong>Предсказание:</strong> обновление кадрового списка, генерация результатов</li>
   <li><strong>Отчёты:</strong> визуализация результатов и формирование отчётов</li>
