@@ -1,4 +1,3 @@
-from collections import Counter
 from datetime import datetime
 import logging
 import os
@@ -13,7 +12,6 @@ import optuna
 import pandas as pd
 import shap  # type: ignore
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.exceptions import UndefinedMetricWarning
 from sklearn.feature_selection import SelectKBest, f_classif
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
@@ -46,7 +44,7 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.3
 RANDOM_STATE = 40
-N_TRIALS = 2000  # итерации для оптуны
+N_TRIALS = 3000  # итерации для оптуны
 N_SPLITS = 10  # число кроссвалидаций
 METRIC = "custom"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
@@ -63,7 +61,18 @@ main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
-def custom_metric_from_counts(tp, tn, fn, fp):
+def get_confusion_counts(cm):
+    if cm.shape == (2, 2):
+        tn, fp, fn, tp = cm.ravel()
+    else:
+        tn = cm[0, 0] if cm.shape[0] > 0 and cm.shape[1] > 0 else 0
+        fp = cm[0, 1] if cm.shape[0] > 0 and cm.shape[1] > 1 else 0
+        fn = cm[1, 0] if cm.shape[0] > 1 and cm.shape[1] > 0 else 0
+        tp = cm[1, 1] if cm.shape[0] > 1 and cm.shape[1] > 1 else 0
+    return tn, fp, fn, tp
+
+
+def custom_metric_from_counts(tp: float, tn: float, fn: float, fp: float) -> float:
     fn_score = np.exp(-fn / 5)
     if fn > 0:
         return fn_score
@@ -84,20 +93,6 @@ def is_new_model_better(new_metrics, old_metrics, delta=0.001):
     if new_score < old_score - delta:
         return False
 
-    # Если основной METRIC — f1, сравниваем дальше по recall, precision
-    if METRIC == "f1":
-        new_recall = round3(new_metrics.get("recall", 0))
-        old_recall = round3(old_metrics.get("recall", 0))
-        if new_recall > old_recall + delta:
-            return True
-        if new_recall < old_recall - delta:
-            return False
-
-        new_precision = round3(new_metrics.get("precision", 0))
-        old_precision = round3(old_metrics.get("precision", 0))
-        return new_precision > old_precision + delta
-
-    # Если не f1 и равны — не сохраняем
     return False
 
 
@@ -127,52 +122,6 @@ def convert_all_to_float(df: pd.DataFrame, exclude_cols=None):
     return df
 
 
-def custom_cv_score(model, X, y, threshold, n_splits=N_SPLITS, metric=METRIC):
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
-    scores = []
-
-    for train_idx, valid_idx in skf.split(X, y):
-        X_train_fold, X_valid_fold = X.iloc[train_idx], X.iloc[valid_idx]
-        y_train_fold, y_valid_fold = y.iloc[train_idx], y.iloc[valid_idx]
-
-        model.fit(X_train_fold, y_train_fold)
-        y_probs = model.predict_proba(X_valid_fold)[:, 1]
-        y_preds = (y_probs >= threshold).astype(int)
-
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UndefinedMetricWarning)
-
-                if metric == "f1":
-                    score = f1_score(y_valid_fold, y_preds)
-                elif metric == "recall":
-                    score = recall_score(y_valid_fold, y_preds)
-                elif metric == "precision":
-                    score = precision_score(y_valid_fold, y_preds)
-                elif metric == "roc_auc":
-                    score = roc_auc_score(y_valid_fold, y_probs)
-                elif metric == "custom":
-                    cm = confusion_matrix(y_valid_fold, y_preds, labels=[0, 1])
-                    if cm.shape == (2, 2):
-                        tn, fp, fn, tp = cm.ravel()
-                    else:
-                        tn = cm[0, 0] if cm.shape[0] > 0 and cm.shape[1] > 0 else 0
-                        fp = cm[0, 1] if cm.shape[0] > 0 and cm.shape[1] > 1 else 0
-                        fn = cm[1, 0] if cm.shape[0] > 1 and cm.shape[1] > 0 else 0
-                        tp = cm[1, 1] if cm.shape[0] > 1 and cm.shape[1] > 1 else 0
-                    score = custom_metric_from_counts(tp, tn, fn, fp)
-                else:
-                    raise ValueError(f"Unsupported metric: {metric}")
-
-            if not np.isnan(score):
-                scores.append(score)
-        except Exception as e:
-            print(f"Ошибка на фолде: {e}")
-            continue
-
-    return np.mean(scores) if scores else float("nan")
-
-
 def objective(trial, X_train, y_train, all_columns):
     try:
         k_best = trial.suggest_int("k_best", 5, min(40, X_train.shape[1]))
@@ -190,7 +139,7 @@ def objective(trial, X_train, y_train, all_columns):
             "min_samples_split": trial.suggest_int(name="min_samples_split", low=2, high=10),
             "min_samples_leaf": trial.suggest_int(name="min_samples_leaf", low=2, high=6),
             "min_weight_fraction_leaf": trial.suggest_float(
-                name="min_weight_fraction_leaf", low=0.0, high=0.05
+                name="min_weight_fraction_leaf", low=0.0, high=0.05, step=0.001
             ),
             "max_features": trial.suggest_categorical(
                 name="max_features", choices=["sqrt", "log2"]
@@ -200,12 +149,12 @@ def objective(trial, X_train, y_train, all_columns):
                 name="criterion", choices=["gini", "entropy", "log_loss"]
             ),
             "bootstrap": True,
-            "max_samples": trial.suggest_float(name="max_samples", low=0.6, high=0.95),
+            "max_samples": trial.suggest_float(name="max_samples", low=0.6, high=0.95, step=0.001),
             "oob_score": trial.suggest_categorical(name="oob_score", choices=[True, False]),
             "class_weight": trial.suggest_categorical(
                 name="class_weight", choices=["balanced", "balanced_subsample", None]
             ),
-            "ccp_alpha": trial.suggest_float(name="ccp_alpha", low=0.0, high=0.01),
+            "ccp_alpha": trial.suggest_float(name="ccp_alpha", low=0.0, high=0.01, step=0.001),
         }
 
         skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
@@ -226,7 +175,7 @@ def objective(trial, X_train, y_train, all_columns):
             for t in THRESHOLDS:
                 y_pred_t = (y_proba >= t).astype(int)
                 cm_t = confusion_matrix(y_val, y_pred_t, labels=[0, 1])
-                tn, fp, fn, tp = cm_t.ravel() if cm_t.shape == (2, 2) else (0, 0, 0, 0)
+                tn, fp, fn, tp = get_confusion_counts(cm_t)
 
                 precision_t = precision_score(y_val, y_pred_t, zero_division=0)
                 if fn > 20 or precision_t < 0.5:
@@ -243,7 +192,7 @@ def objective(trial, X_train, y_train, all_columns):
                 elif METRIC == "roc_auc":
                     score_t = roc_auc_score(y_val, y_proba)
                 elif METRIC == "custom":
-                    score_t = custom_metric_from_counts(tp=tp, tn=tn, fn=fn, fp=fp)
+                    score_t = custom_metric_from_counts(tp, tn, fn, fp)
                 else:
                     score_t = recall_score(y_val, y_pred_t)
 
@@ -288,12 +237,12 @@ def objective(trial, X_train, y_train, all_columns):
         elif METRIC == "roc_auc":
             score = mean_roc_auc
         elif METRIC == "custom":
-            score = custom_metric_from_counts(
-                tp=int(np.mean(tp_list)),
-                tn=int(np.mean(tn_list)),
-                fn=int(np.mean(fn_list)),
-                fp=int(np.mean(fp_list)),
-            )
+            tp = np.mean(tp_list)
+            tn = np.mean(tn_list)
+            fn = np.mean(fn_list)
+            fp = np.mean(fp_list)
+
+            score = custom_metric_from_counts(tp, tn, fn, fp)  # type: ignore
         else:
             logger.warning(f"Неизвестная метрика '{METRIC}', используется recall по умолчанию.")
             score = mean_recall
@@ -363,7 +312,7 @@ def run_optuna_experiment(
         recall = recall_score(y_test, y_pred)
         precision = precision_score(y_test, y_pred)
         cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
-        tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
+        tn, fp, fn, tp = get_confusion_counts(cm)
 
         final_metrics = {
             "accuracy": accuracy_score(y_test, y_pred),
@@ -424,8 +373,7 @@ def run_optuna_experiment(
         precision_train = precision_score(y_train, y_pred_train)
         cm_train = confusion_matrix(y_train, y_pred_train, labels=[0, 1])
         tp = tn = fp = fn = 0
-        if cm_train.shape == (2, 2):
-            tn, fp, fn, tp = cm_train.ravel()
+        tn, fp, fn, tp = get_confusion_counts(cm_train)
 
         final_metrics_train = {
             "accuracy": accuracy_score(y_train, y_pred_train),
@@ -572,7 +520,7 @@ def run_optuna_experiment(
             for t in THRESHOLDS:
                 y_pred_temp = (y_pred_proba >= t).astype(int)
                 cm_temp = confusion_matrix(y_test, y_pred_temp, labels=[0, 1])
-                tn, fp, fn, tp = cm_temp.ravel() if cm_temp.shape == (2, 2) else (0, 0, 0, 0)
+                tn, fp, fn, tp = get_confusion_counts(cm_temp)
                 tps.append(tp)
                 fps.append(fp)
                 fns.append(fn)
@@ -600,8 +548,8 @@ def run_optuna_experiment(
             mlflow.log_artifact("threshold_confusion_counts.png")
             os.remove("threshold_confusion_counts.png")
 
-            selected_features = study.best_trial.user_attrs["selected_features"]
-            n_selected_features = study.best_trial.user_attrs["n_selected_features"]
+            # selected_features = study.best_trial.user_attrs["selected_features"]
+            # n_selected_features = study.best_trial.user_attrs["n_selected_features"]
 
             # Сохраняем список признаков в текстовый файл
             selected_features_path = "selected_features.txt"
