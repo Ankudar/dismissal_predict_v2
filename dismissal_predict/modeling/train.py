@@ -43,9 +43,10 @@ os.makedirs(MODELS, exist_ok=True)
 INPUT_FILE_MAIN_USERS = f"{DATA_PROCESSED}/main_users_for_train.csv"
 INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
-TEST_SIZE = 0.3
+TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 2  # итерации для оптуны
+N_TRIALS = 3000  # итерации для оптуны
+N_TRIALS_FOR_TOP = 100
 N_SPLITS = 10  # число кроссвалидаций
 METRIC = "custom"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
@@ -74,7 +75,7 @@ def get_confusion_counts(cm):
 
 
 def custom_metric_from_counts(tp: float, tn: float, fn: float, fp: float) -> float:
-    fn_score = np.exp(-fn / 5)
+    fn_score = np.exp(-fn / 4)
     if fn > 0:
         return fn_score
     else:
@@ -653,7 +654,7 @@ if __name__ == "__main__":
         X_test=X_test_top,
         y_test=y_test_top,
         metric=METRIC,
-        n_trials=10,
+        n_trials=N_TRIALS_FOR_TOP,
         experiment_name=MLFLOW_EXPERIMENT_TOP,
         model_output_path=f"{MODELS}/top_users.pkl",
         current_time=today(),

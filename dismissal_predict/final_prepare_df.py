@@ -175,7 +175,7 @@ class DataPreprocessor:
         ordinal_cols = [col for col in self.cat_cols if df[col].nunique() >= 21]
 
         self.onehot_encoder = OneHotEncoder(
-            handle_unknown="ignore", sparse_output=False  # , drop="first"
+            handle_unknown="ignore", sparse_output=False, drop="first"
         )
         self.ordinal_encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
 
@@ -422,7 +422,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
 
         main_users["зп_к_возрасту"] = main_users["ср_зп"] / (main_users["возраст"] + 1)
         main_users["зп_к_стажу"] = main_users["ср_зп"] / (main_users["стаж"] + 1)
-        main_users["стаж_к_возрасту"] = main_users["стаж"] / (main_users["возраст"] + 1)
+        # main_users["стаж_к_возрасту"] = main_users["стаж"] / (main_users["возраст"] + 1)
 
         main_all_path = f"{DATA_PROCESSED}/main_all.csv"
         main_users_updated = update_existing_data(main_users, main_all_path, id_col="id")
