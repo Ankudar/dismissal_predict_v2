@@ -44,9 +44,9 @@ DROP_COLS = [
     "уровень_зп",
     "грейд",
     "число_детей",
-    "id_руководителя",
-    "ср_зп",
     "не_доплачивают",
+    "зп_на_число_детей",
+    "id_руководителя",
 ]
 
 FLOAT_COLS = ["тон", "увольнение", "оффер", "вредительство", "личная жизнь", "стресс", "конфликты"]
@@ -394,7 +394,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
 
         main_users["скоро_годовщина_приема"] = (
             (main_users["дата_приема_в_1с"].dt.month == today.month)
-            & (abs(main_users["дата_приема_в_1с"].dt.day - today.day) <= 30)
+            & ((main_users["дата_приема_в_1с"].dt.day - today.day).abs() <= 30)
         ).astype(int)
 
         main_users["есть_маленькие_дети"] = (
@@ -432,15 +432,24 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
         )
 
         preprocessor = DataPreprocessor()
-        main_users_for_train = preprocessor.fit(main_users)
+        main_users_for_train = preprocessor.fit(main_users_updated)
 
+        # Проверка и удаление строк с NaN
+        nan_rows = main_users_for_train.isnull().any(axis=1)
+        n_removed = nan_rows.sum()
+
+        if n_removed > 0:
+            print("Обнаружены NaN в строках — удаляем:")
+            print(main_users_for_train.isnull().sum()[main_users_for_train.isnull().any()])
+            main_users_for_train = main_users_for_train[~nan_rows]
+            print(f"Удалено строк: {n_removed}")
+        else:
+            print("NaN не обнаружены — удаление не требуется.")
+
+        # Сохраняем финальные данные и препроцессор
         main_users_for_train.to_csv(f"{DATA_PROCESSED}/main_users_for_train.csv", index=False)
         preprocessor.save(f"{DATA_PROCESSED}/preprocessor.pkl")
 
-        print(
-            "NaNs in main_users_for_train:\n",
-            main_users_for_train.isnull().sum()[main_users_for_train.isnull().any()],
-        )
     except Exception as e:
         logger.info(f"Ошибка: {e}")
         raise
@@ -465,16 +474,23 @@ def prepare_with_mic():
     main_top_updated.to_csv(f"{DATA_PROCESSED}/main_top_history_do_not_tuch.csv", index=False)
 
     preprocessor_top = DataPreprocessor()
-    main_top_for_train = preprocessor_top.fit(main_top)
+    main_top_for_train = preprocessor_top.fit(main_top_updated)
 
+    # Проверка и удаление строк с NaN
+    nan_rows = main_top_for_train.isnull().any(axis=1)
+    n_removed = nan_rows.sum()
+
+    if n_removed > 0:
+        print("Обнаружены NaN в строках main_top_for_train — удаляем:")
+        print(main_top_for_train.isnull().sum()[main_top_for_train.isnull().any()])
+        main_top_for_train = main_top_for_train[~nan_rows]
+        print(f"Удалено строк: {n_removed}")
+    else:
+        print("NaN не обнаружены в main_top_for_train — удаление не требуется.")
+
+    # Сохраняем финальные данные и препроцессор
     main_top_for_train.to_csv(f"{DATA_PROCESSED}/main_top_for_train.csv", index=False)
-
     preprocessor_top.save(f"{DATA_PROCESSED}/preprocessor_top.pkl")
-
-    print(
-        "NaNs in main_top_for_train:\n",
-        main_top_for_train.isnull().sum()[main_top_for_train.isnull().any()],
-    )
 
 
 def calc_target_correlations(df, target_col: str = "уволен", file_path: str = "data.csv"):
@@ -603,11 +619,13 @@ def run_all():
 if __name__ == "__main__":
     logger.info("Финальная подготовка баз началась")
     run_all()
-    main_all = pd.read_csv(f"{DATA_PROCESSED}/main_all.csv", delimiter=",", decimal=",")
+    main_all_history_do_not_tuch = pd.read_csv(
+        f"{DATA_PROCESSED}/main_all_history_do_not_tuch.csv", delimiter=",", decimal=","
+    )
     corr = calc_target_correlations(
-        main_all,
+        main_all_history_do_not_tuch,
         target_col="уволен",
-        file_path=f"{DATA_PROCESSED}/main_all.csv",
+        file_path=f"{DATA_PROCESSED}/main_all_history_do_not_tuch.csv",
     )
 
     logger.info("Финальная подготовка баз завершилась")

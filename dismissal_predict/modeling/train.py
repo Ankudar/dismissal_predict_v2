@@ -44,12 +44,13 @@ os.makedirs(MODELS, exist_ok=True)
 INPUT_FILE_MAIN_USERS = f"{DATA_PROCESSED}/main_users_for_train.csv"
 INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
-TEST_SIZE = 0.2
+TEST_SIZE = 0.3
 RANDOM_STATE = 40
-N_TRIALS = 2  # итерации для оптуны
-N_TRIALS_FOR_TOP = 2
+N_TRIALS = 50  # итерации для оптуны
+N_TRIALS_FOR_TOP = 50
 N_SPLITS = 10  # число кроссвалидаций
 METRIC = "custom"
+PENALTY_FOR_CUSTOM_METRIC = 16  # меньше -> жестче
 MLFLOW_EXPERIMENT_MAIN = "main_users"
 MLFLOW_EXPERIMENT_TOP = "top_users"
 
@@ -76,7 +77,7 @@ def get_confusion_counts(cm):
 
 
 def custom_metric_from_counts(tp: float, tn: float, fn: float, fp: float) -> float:
-    fn_score = np.exp(-fn / 4)
+    fn_score = np.exp(-fn / PENALTY_FOR_CUSTOM_METRIC)
     if fn > 0:
         return fn_score
     else:
@@ -448,6 +449,7 @@ def log_with_mlflow(
             )
 
             mlflow.log_param("opt_metric", f"{metric}")
+            mlflow.log_param("metric_penalty", PENALTY_FOR_CUSTOM_METRIC)
 
             mlflow.log_metric("f1_train", round(final_metrics_train["f1"], 3))
             mlflow.log_metric("f1_test", round(final_metrics["f1"], 3))
@@ -663,6 +665,21 @@ def log_with_mlflow(
                 json.dump(experiment_config, f, indent=4)
             mlflow.log_artifact("experiment_config.json")
             os.remove("experiment_config.json")
+
+            # Log Optuna optimization progress (trial score per iteration)
+            scores = [trial.value for trial in study.trials if trial.value is not None]
+
+            plt.figure(figsize=(10, 6))
+            plt.plot(scores, marker="o", linestyle="-", alpha=0.8)
+            plt.xlabel("Trial Number")
+            plt.ylabel("Score")
+            plt.title("Optuna Optimization Progress")
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig("optuna_progress.png")
+            plt.close()
+            mlflow.log_artifact("optuna_progress.png")
+            os.remove("optuna_progress.png")
 
     except Exception as e:
         logger.info(f"Ошибка: {e}")
