@@ -47,6 +47,7 @@ DROP_COLS = [
     "не_доплачивают",
     "зп_на_число_детей",
     "id_руководителя",
+    "зп_на_ср_зп_по_компании",
 ]
 
 FLOAT_COLS = ["тон", "увольнение", "оффер", "вредительство", "личная жизнь", "стресс", "конфликты"]
@@ -152,27 +153,28 @@ class DataPreprocessor:
         uvolen_series = df["уволен"] if "уволен" in df.columns else None
 
         df = self.drop_trash_feature(df)
-        # df = self.drop_trash_rows(df)
 
         if uvolen_series is not None:
             uvolen_series = uvolen_series.loc[df.index]
 
-        # Удаляем "уволен" ПЕРЕД определением признаков!
         if "уволен" in df.columns:
             df = df.drop(columns=["уволен"])
 
-        # Категориальные
-        self.cat_cols = df.select_dtypes(include=["object"]).columns.tolist()
-        # for col in self.cat_cols:
-        #     df[col] = df[col].astype(str).fillna("other")
+        # Попробуем привести потенциальные числа к числовому типу
+        for col in df.columns:
+            try:
+                df[col] = pd.to_numeric(df[col])
+            except Exception:
+                pass
 
-        # Числовые
+        # Обновим числовые и категориальные признаки после приведения типов
         self.numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+        self.cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
 
         df = self._handle_nans(df)
 
-        onehot_cols = [col for col in self.cat_cols if df[col].nunique() <= 20]
-        ordinal_cols = [col for col in self.cat_cols if df[col].nunique() >= 21]
+        onehot_cols = [col for col in self.cat_cols if df[col].nunique() <= 10]
+        ordinal_cols = [col for col in self.cat_cols if df[col].nunique() > 10]
 
         self.onehot_encoder = OneHotEncoder(
             handle_unknown="ignore", sparse_output=False, drop="first"
@@ -190,10 +192,9 @@ class DataPreprocessor:
 
         df_transformed = self.preprocessor.fit_transform(df)
         df_transformed = pd.DataFrame(
-            df_transformed, columns=self.preprocessor.get_feature_names_out()  # type: ignore
+            df_transformed, columns=self.preprocessor.get_feature_names_out()
         )
 
-        # Возвращаем 'уволен'
         if uvolen_series is not None:
             df_transformed["уволен"] = uvolen_series.values
 
@@ -444,7 +445,7 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
             main_users_for_train = main_users_for_train[~nan_rows]
             print(f"Удалено строк: {n_removed}")
         else:
-            print("NaN не обнаружены — удаление не требуется.")
+            print("NaN не обнаружены в main_all_for_train — удаление не требуется.")
 
         # Сохраняем финальные данные и препроцессор
         main_users_for_train.to_csv(f"{DATA_PROCESSED}/main_users_for_train.csv", index=False)

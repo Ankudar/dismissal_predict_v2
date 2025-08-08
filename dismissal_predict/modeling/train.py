@@ -46,18 +46,17 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.25
 RANDOM_STATE = 40
-N_TRIALS = 5  # итерации для оптуны
-N_TRIALS_FOR_TOP = 5
-N_SPLITS = 10  # число кроссвалидаций
+N_TRIALS = 5000  # итерации для оптуны
+N_TRIALS_FOR_TOP = 1000
+N_SPLITS = 5  # число кроссвалидаций
 METRIC = "custom"
-PENALTY_FOR_CUSTOM_METRIC = 45  # меньше -> жестче штраф, ниже метрика
 MLFLOW_EXPERIMENT_MAIN = "main_users"
 MLFLOW_EXPERIMENT_TOP = "top_users"
 
 TARGET_COL = "уволен"
 
 N_JOBS = -1
-THRESHOLDS = np.arange(0.1, 0.9, 0.01)
+THRESHOLDS = np.arange(0.1, 0.9, 0.02)
 
 warnings.filterwarnings("ignore")
 
@@ -69,23 +68,15 @@ def get_confusion_counts(cm):
     if cm.shape == (2, 2):
         tn, fp, fn, tp = cm.ravel()
     else:
-        tn = cm[0, 0] if cm.shape[0] > 0 and cm.shape[1] > 0 else 0
-        fp = cm[0, 1] if cm.shape[0] > 0 and cm.shape[1] > 1 else 0
-        fn = cm[1, 0] if cm.shape[0] > 1 and cm.shape[1] > 0 else 0
-        tp = cm[1, 1] if cm.shape[0] > 1 and cm.shape[1] > 1 else 0
+        tn, fp, fn, tp = get_confusion_counts(cm)
     return tn, fp, fn, tp
 
 
-def custom_metric_from_counts(tp: float, tn: float, fn: float, fp: float) -> float:
-    # fn_score = np.exp(-fn / PENALTY_FOR_CUSTOM_METRIC)
-    # if fn > 0:
-    #     return fn_score
-    # else:
-    #     fp_score = np.exp(-fp / (tn + 1e-6))
-    #     return fp_score
-    fn_score = np.exp(-fn / PENALTY_FOR_CUSTOM_METRIC)
-    fp_ratio = fp / (fp + tn + 1e-6)
-    return fn_score * (1 - fp_ratio)
+def custom_metric_from_counts(tp, tn, fn, fp):
+    fn_penalty = np.exp(-0.35 * fn)
+    fp_penalty = np.exp(-0.08 * fp)
+    score = fn_penalty * 0.75 + fp_penalty * 0.25
+    return round(score, 3)
 
 
 def is_new_model_better(new_metrics, old_metrics, delta=0.001):
@@ -141,27 +132,16 @@ def objective(trial, X_train, y_train, all_columns):
         trial.set_user_attr("n_selected_features", len(selected_features))
 
         params = {
-            "n_estimators": trial.suggest_int(name="n_estimators", low=200, high=600, step=50),
-            "max_depth": trial.suggest_int(name="max_depth", low=4, high=15),
-            "min_samples_split": trial.suggest_int(name="min_samples_split", low=2, high=10),
-            "min_samples_leaf": trial.suggest_int(name="min_samples_leaf", low=2, high=6),
-            "min_weight_fraction_leaf": trial.suggest_float(
-                name="min_weight_fraction_leaf", low=0.0, high=0.05, step=0.001
-            ),
-            "max_features": trial.suggest_categorical(
-                name="max_features", choices=["sqrt", "log2"]
-            ),
-            "max_leaf_nodes": trial.suggest_int(name="max_leaf_nodes", low=10, high=50),
-            "criterion": trial.suggest_categorical(
-                name="criterion", choices=["gini", "entropy", "log_loss"]
+            "n_estimators": trial.suggest_int("n_estimators", 200, 400, step=50),
+            "max_depth": trial.suggest_int("max_depth", 4, 12),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 2, 6),
+            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
+            "criterion": trial.suggest_categorical("criterion", ["gini", "entropy"]),
+            "class_weight": trial.suggest_categorical(
+                "class_weight", ["balanced", "balanced_subsample", None]
             ),
             "bootstrap": True,
-            "max_samples": trial.suggest_float(name="max_samples", low=0.6, high=0.95, step=0.001),
-            "oob_score": trial.suggest_categorical(name="oob_score", choices=[True, False]),
-            "class_weight": trial.suggest_categorical(
-                name="class_weight", choices=["balanced", "balanced_subsample", None]
-            ),
-            "ccp_alpha": trial.suggest_float(name="ccp_alpha", low=0.0, high=0.01, step=0.001),
         }
 
         skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
@@ -177,17 +157,24 @@ def objective(trial, X_train, y_train, all_columns):
             model.fit(X_tr, y_tr)
             y_proba = model.predict_proba(X_val)[:, 1]
 
+            MIN_PRECISION = 0.5
+            FN_THRESHOLD_RATIO = 0.01
             best_score = -np.inf
             best_threshold = 0.5
+
+            max_fn_allowed = max(3, int(np.ceil(FN_THRESHOLD_RATIO * np.sum(y_val == 1))))
+
             for t in THRESHOLDS:
                 y_pred_t = (y_proba >= t).astype(int)
                 cm_t = confusion_matrix(y_val, y_pred_t, labels=[0, 1])
                 tn, fp, fn, tp = get_confusion_counts(cm_t)
 
                 precision_t = precision_score(y_val, y_pred_t, zero_division=0)
-                if fn > 20 or precision_t < 0.5:
+
+                if fn > max_fn_allowed or precision_t < MIN_PRECISION:
                     continue
 
+                # Выбор метрики
                 if METRIC == "f1":
                     score_t = f1_score(y_val, y_pred_t, zero_division=0)
                 elif METRIC == "accuracy":
@@ -217,10 +204,7 @@ def objective(trial, X_train, y_train, all_columns):
             roc_auc.append(roc_auc_score(y_val, y_pred))
 
             cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
-            tn = cm[0, 0] if cm.shape[0] > 0 and cm.shape[1] > 0 else 0
-            fp = cm[0, 1] if cm.shape[0] > 0 and cm.shape[1] > 1 else 0
-            fn = cm[1, 0] if cm.shape[0] > 1 and cm.shape[1] > 0 else 0
-            tp = cm[1, 1] if cm.shape[0] > 1 and cm.shape[1] > 1 else 0
+            tn, fp, fn, tp = get_confusion_counts(cm)
 
             fn_list.append(fn)
             fp_list.append(fp)
@@ -452,7 +436,6 @@ def log_with_mlflow(
             )
 
             mlflow.log_param("opt_metric", f"{metric}")
-            mlflow.log_param("metric_penalty", PENALTY_FOR_CUSTOM_METRIC)
 
             mlflow.log_metric("f1_train", round(final_metrics_train["f1"], 3))
             mlflow.log_metric("f1_test", round(final_metrics["f1"], 3))
@@ -662,7 +645,6 @@ def log_with_mlflow(
                 "N_SPLITS": N_SPLITS,
                 "METRIC": METRIC,
                 "TARGET_COL": TARGET_COL,
-                "PENALTY_FOR_CUSTOM_METRIC": PENALTY_FOR_CUSTOM_METRIC,
             }
 
             with open("experiment_config.json", "w") as f:
