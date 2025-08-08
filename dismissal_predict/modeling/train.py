@@ -76,7 +76,7 @@ def custom_metric_from_counts(tp, tn, fn, fp):
     fn_penalty = np.exp(-0.35 * fn)
     fp_penalty = np.exp(-0.08 * fp)
     score = fn_penalty * 0.75 + fp_penalty * 0.25
-    return round(score, 3)
+    return round(score, 6)
 
 
 def is_new_model_better(new_metrics, old_metrics, delta=0.001):

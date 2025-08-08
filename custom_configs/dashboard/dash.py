@@ -1,4 +1,3 @@
-import csv
 from datetime import datetime
 import json
 import os
@@ -11,14 +10,47 @@ import plotly.express as px
 import shap
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
 import streamlit as st
-import streamlit.components.v1 as components
-import streamlit_authenticator as stauth
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(layout="wide")
 CONFIG_PATH = "config.json"
 PROJECT_ID = "dismissial_predict"
 LOG_CSV_PATH = "auth_log.csv"
+
+COLUMNS_TO_SHOW = [
+    # 🎯 Целевая информация
+    "дата_увольнения",
+    # 👤 Личное
+    "дата_рождения",
+    "возраст",
+    "пол",
+    # 👨‍👩‍👧‍👦 Семья
+    "число_детей",
+    "средний_возраст_детей",
+    "дети_мальчики",
+    "дети_девочки",
+    "есть_маленькие_дети",
+    # 🏢 Рабочая информация
+    "дата_приема_в_1с",
+    "стаж",
+    "текущая_должность_на_портале",
+    "категория",
+    "бе",
+    "отдел",
+    "id_руководителя",
+    "подчиненные",
+    # 📅 События
+    "скоро_др",
+    "скоро_годовщина_приема",
+    # 💰 Финансы и производные
+    "зп_на_ср_зп_по_компании",
+    "зп_к_возрасту",
+    "зп_к_стажу",
+]
+
+info_file = Path(
+    "/home/root6/python/dismissal_predict_v2/data/processed/main_all_history_do_not_tuch.csv"
+)
 
 
 def log_auth_event_csv(login: str, status: str):
@@ -37,10 +69,6 @@ def log_auth_event_csv(login: str, status: str):
         writer.writerow(row)
 
 
-if "user_info_json" not in st.session_state:
-    st.session_state.user_info_json = ""
-
-
 def handle_auth():
     placeholder = st.empty()
 
@@ -54,11 +82,13 @@ def handle_auth():
     if st.session_state.login_stage == "username":
         with placeholder.container():
             st.title("🔐 Вход")
-            login_input = st.text_input("Введите логин")
-            if login_input:
+            with st.form("login_form"):
+                login_input = st.text_input("Введите логин")
+                submit_login = st.form_submit_button("Ввод")
+
+            if submit_login:
                 if login_input not in allowed_users:
-                    str_login = "fail_unknown_user"
-                    log_auth_event_csv(st.session_state.login, str_login)
+                    log_auth_event_csv(login_input, "fail_unknown_user")
                     st.error("⛔ Пользователь не имеет доступа")
                 else:
                     st.session_state.login = login_input
@@ -74,8 +104,11 @@ def handle_auth():
         if st.session_state.login_stage != "authenticated":
             with placeholder.container():
                 st.title("🔐 Авторизация")
-                password_input = st.text_input("Введите пароль", type="password")
-                if password_input:
+                with st.form("password_form"):
+                    password_input = st.text_input("Введите пароль", type="password")
+                    submit_pass = st.form_submit_button("Ввод")
+
+                if submit_pass:
                     if bcrypt.checkpw(
                         password_input.encode(), user_record["password"].encode("utf-8")
                     ):
@@ -85,17 +118,19 @@ def handle_auth():
                         st.rerun()
                     else:
                         st.session_state.password_attempts += 1
-                        str_password = "fail_wrong_password"
-                        log_auth_event_csv(st.session_state.login, str_password)
+                        log_auth_event_csv(st.session_state.login, "fail_wrong_password")
                         st.error("❌ Неверный пароль")
             st.stop()
 
     elif user_record is None:
         with placeholder.container():
             st.title("🛡 Создание пароля")
-            new_pass1 = st.text_input("Введите новый пароль", type="password")
-            new_pass2 = st.text_input("Повторите пароль", type="password")
-            if new_pass1 and new_pass2:
+            with st.form("new_password_form"):
+                new_pass1 = st.text_input("Введите новый пароль", type="password")
+                new_pass2 = st.text_input("Повторите пароль", type="password")
+                submit_new = st.form_submit_button("Создать")
+
+            if submit_new:
                 if new_pass1 != new_pass2:
                     st.error("❌ Пароли не совпадают")
                 else:
@@ -106,10 +141,7 @@ def handle_auth():
                     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                         json.dump(config, f, ensure_ascii=False, indent=2)
 
-                    str_password = f"created_new_password"
-
-                    log_auth_event_csv(st.session_state.login, str_password)
-
+                    log_auth_event_csv(st.session_state.login, "created_new_password")
                     st.success("✅ Пароль сохранён.")
                     st.session_state.login_stage = "authenticated"
                     placeholder.empty()
@@ -117,29 +149,220 @@ def handle_auth():
         st.stop()
 
 
-# Загрузка конфигурации
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    config = json.load(f)
+def render_user_card(user: dict):
+    def safe_get(key, fmt=None, suffix=""):
+        val = user.get(key)
+        if pd.isna(val):
+            return "nan"
+        try:
+            if fmt:
+                return fmt.format(val) + suffix
+            return str(val) + suffix
+        except:
+            return "nan"
 
-# Получение разрешённых пользователей
-allowed_users = []
-for project in config["projects"]:
-    if project["id"] == PROJECT_ID:
-        allowed_users = project.get("allowed_users", [])
+    def safe_bool(key):
+        val = user.get(key)
+        return "Да" if val else "Нет"
 
-handle_auth()
+    st.markdown("### 👤 Карточка сотрудника")
+    st.markdown(
+        f"""
+    <b>📌 Общая информация</b><br>
+    Уволен: {safe_get("дата_увольнения")}<br>
+    Дата рождения: {safe_get("дата_рождения")} &nbsp;&nbsp;&nbsp;
+    Пол: {safe_get("пол")} &nbsp;&nbsp;&nbsp;
+    Возраст: {safe_get("возраст", "{}")}<br><br>
 
-# Доступ к дашборду (успешная авторизация)
-if st.session_state.login_stage == "authenticated":
-    st_autorefresh(interval=3600000, limit=None, key="auto_refresh")
-    st.title("📊 Дашборд риска увольнения сотрудников")
+    <b>👨‍👩‍👧‍👦 Семья</b><br>
+    Детей: {safe_get("число_детей")} &nbsp;&nbsp;&nbsp;
+    Мальчики: {safe_get("дети_мальчики")} &nbsp;&nbsp;&nbsp;
+    Девочки: {safe_get("дети_девочки")} &nbsp;&nbsp;&nbsp;
+    Маленькие дети (<=5): {safe_bool("есть_маленькие_дети")}<br><br>
 
-    info_file = Path("./python/dismissal_predict_v2/data/processed/main_all.csv")
+    <b>💼 Работа</b><br>
+    Дата приёма: {safe_get("дата_приема_в_1с")} &nbsp;&nbsp;&nbsp;<br>
+    Руководитель: {safe_get("id_руководителя")}<br>
+    Стаж: {safe_get("стаж", "{:.1f}")}<br>
+    Должность: {safe_get("текущая_должность_на_портале")}<br>
+    Категория: {safe_get("категория")} &nbsp;&nbsp;&nbsp;<br>
+    БЕ: {safe_get("бе")}<br>
+    Отдел: {safe_get("отдел")}<br>
+    Подчиненные: {safe_get("подчиненные")}<br><br>
 
-    if info_file.exists():
-        st.success(f"✅ Данные загружены")
-    else:
-        st.error("❌ Файл с данными не найден")
+    <b>📅 События</b><br>
+    Скоро ДР: {safe_bool("скоро_др")} &nbsp;&nbsp;&nbsp;<br>
+    Скоро годовщина приёма: {safe_bool("скоро_годовщина_приема")}<br><br>
+
+    <b>💰 Финансы</b><br>
+    ЗП к средней по компании: {safe_get("зп_на_ср_зп_по_компании", "{:.2f}")}<br><br>
+    """,
+        unsafe_allow_html=True,
+    )
+
+
+def plot_top_departments_by_risk(df_all: pd.DataFrame, latest_date: str, info_file: Path):
+    st.subheader("📊 Топ-10 отделов по среднему риску увольнения")
+
+    if not info_file.exists():
+        st.warning("Файл с информацией о сотрудниках не найден.")
+        return
+
+    try:
+        # Загрузка info_file
+        df_info = pd.read_csv(info_file)
+        df_info.columns = [str(col).strip().lower() for col in df_info.columns]
+
+        if "id" not in df_info.columns:
+            st.error("В info_file нет колонки 'id'")
+            return
+        if "отдел" not in df_info.columns:
+            st.error("В info_file нет колонки 'отдел'")
+            return
+
+        # Приведение id к строкам → float (сначала для корректности merge)
+        df_info["id"] = df_info["id"].astype(str).str.strip().str.lower()
+        df_all["id"] = df_all["id"].astype(str).str.strip().str.lower()
+
+        if latest_date not in df_all.columns:
+            st.error(f"Колонка '{latest_date}' не найдена в df_all.")
+            return
+
+        df_all["id"] = df_all["id"].astype(float)
+        df_info["id"] = df_info["id"].astype(float)
+
+        # Слияние
+        merged_df = df_all.merge(df_info[["id", "отдел"]], how="left", on="id")
+
+        # Удалим строки без отдела или без latest_date
+        merged_df = merged_df.dropna(subset=["отдел", latest_date])
+
+        if merged_df.empty:
+            st.warning("Нет данных с ненулевыми отделами и рисками.")
+            return
+
+        # Агрегация
+        agg_df = (
+            merged_df.groupby("отдел")[latest_date]
+            .mean()
+            .sort_values(ascending=False)
+            .head(10)
+            .reset_index()
+        )
+        agg_df.columns = ["Отдел", "Средний риск"]
+
+        if agg_df.empty:
+            st.info("Нет данных для отображения.")
+            return
+
+        # Визуализация через matplotlib
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.barh(agg_df["Отдел"], agg_df["Средний риск"], color="skyblue")
+        ax.invert_yaxis()
+        ax.set_xlabel("Средний риск увольнения")
+        ax.set_title("Топ-10 отделов по среднему риску увольнения")
+        plt.tight_layout()
+
+        st.pyplot(fig)
+
+    except Exception as e:
+        st.error(f"Ошибка при построении графика: {e}")
+
+
+def show_critical_department_profiles(
+    df_all: pd.DataFrame, info_file: Path, latest_date: str, path_all: Path
+):
+    st.subheader("🏢 Профили критических отделов")
+
+    if not info_file.exists():
+        st.warning("Файл с информацией о сотрудниках не найден.")
+        return
+
+    try:
+        df_info = pd.read_csv(info_file)
+        df_info.columns = [str(c).strip().lower() for c in df_info.columns]
+        df_info["id"] = df_info["id"].astype(str).str.strip().str.lower()
+        df_info["фио"] = df_info["фио"].astype(str).str.strip().str.lower()
+
+        df_all["id"] = df_all["id"].astype(str).str.strip().str.lower()
+        df_all["фио"] = df_all["фио"].astype(str).str.strip().str.lower()
+
+        top_departments_df = (
+            df_all[["id", "фио", latest_date]]
+            .merge(df_info[["id", "отдел", "должность"]], how="left", on="id")
+            .dropna(subset=["отдел", latest_date])
+        )
+
+        avg_risk_by_dept = (
+            top_departments_df.groupby("отдел")[latest_date]
+            .mean()
+            .sort_values(ascending=False)
+            .head(10)
+            .reset_index()
+            .rename(columns={latest_date: "средний_риск"})
+        )
+
+        selected_dept = st.selectbox(
+            "Выберите отдел из топ-10 по риску:",
+            avg_risk_by_dept["отдел"],
+            index=0,
+        )
+
+        dept_df = top_departments_df[top_departments_df["отдел"] == selected_dept].copy()
+        dept_df = dept_df.dropna(subset=[latest_date])
+
+        st.markdown(f"#### 📊 Распределение рисков в отделе: *{selected_dept}*")
+
+        fig_dept = px.histogram(
+            dept_df,
+            x=latest_date,
+            nbins=20,
+            title=f"Распределение рисков увольнения – {selected_dept}",
+            labels={latest_date: "Риск увольнения"},
+        )
+        fig_dept.update_layout(xaxis_title="Риск", yaxis_title="Число сотрудников")
+        st.plotly_chart(fig_dept, use_container_width=True)
+
+        st.markdown("#### 👥 Сотрудники в отделе")
+
+        try:
+            full_df = pd.read_excel(path_all)
+            full_df.columns = [c.strip().lower() for c in full_df.columns]
+            full_df["фио"] = full_df["фио"].astype(str).str.strip().str.lower()
+
+            dept_df["фио"] = dept_df["фио"].astype(str).str.strip().str.lower()
+            dept_df = dept_df.merge(
+                full_df[["фио", "уволен", "предсказание_увольнения"]],
+                how="left",
+                on="фио",
+            )
+        except Exception as e:
+            st.warning(f"⚠ Не удалось загрузить факт/предсказание: {e}")
+
+        # Удаляем дубли по id
+        dept_df = dept_df.drop_duplicates(subset="id")
+
+        # Убираем уволенных сотрудников
+        dept_df = dept_df[dept_df["уволен"] != 1]
+
+        # Оставляем только нужные столбцы
+        dept_df_display = (
+            dept_df[["фио", "должность", latest_date]]
+            .rename(
+                columns={
+                    "фио": "ФИО",
+                    "должность": "Должность",
+                    latest_date: "Риск увольнения",
+                }
+            )
+            .sort_values("Риск увольнения", ascending=False)
+            .reset_index(drop=True)
+        )
+
+        st.dataframe(dept_df_display, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Ошибка при обработке профиля критических отделов: {e}")
 
 
 def run_dashboard(excel_file: str, title: str):
@@ -225,14 +448,16 @@ def run_dashboard(excel_file: str, title: str):
         # Мерж по ФИО
         filtered_df = filtered_df.merge(df_info[["фио", "должность"]], how="left", on="фио")
 
-        # Удаление должностей:
+        # Удаление должностей: уборщица, офицер
         filtered_df = filtered_df[
-            ~filtered_df["должность"].astype(str).str.strip().str.lower().isin(["123", "456"])
+            ~filtered_df["должность"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin(["должность_1", "должность_2"])
         ]
     else:
-        st.warning(
-            "Файл с должностями main_all.csv не найден. Фильтрация по должностям пропущена."
-        )
+        st.warning("Файл с должностями не найден. Фильтрация по должностям пропущена.")
 
     if filtered_df.empty:
         st.info("Нет сотрудников, соответствующих фильтрам.")
@@ -244,6 +469,10 @@ def run_dashboard(excel_file: str, title: str):
             Выбор строки развернет профиль сотрудника ниже.
         """
     )
+    search_name_tab = st.text_input("🔍 Поиск сотрудника по ФИО", key=f"search_{title}")
+    if search_name_tab:
+        filtered_df = filtered_df[filtered_df["фио"].str.contains(search_name_tab)]
+
     top_risk_df = (
         filtered_df.sort_values(by=latest_date, ascending=False)[["фио", latest_date]]
         .drop_duplicates(subset="фио", keep="first")  # <-- удаляет дубли
@@ -292,34 +521,8 @@ def run_dashboard(excel_file: str, title: str):
             row_info = info_df[info_df["фио"] == fio_lower]
 
             if not row_info.empty:
-                st.subheader("Информация о сотруднике:")
-                columns_to_show = [
-                    "дата_увольнения",
-                    "id_руководителя",
-                    "подчиненные",
-                    "должность",
-                    "дата_рождения",
-                    "дата_приема_в_1с",
-                    "пол",
-                    "текущая_должность_на_портале",
-                    "грейд",
-                    "категория",
-                    "бе",
-                    "отдел",
-                    "число_детей",
-                    "средний_возраст_детей",
-                    "средний_пол_детей",
-                    "уволен",
-                    "возраст",
-                    "стаж",
-                    "скоро_др",
-                    "скоро_годовщика_приема",
-                    "есть_маленькие_дети",
-                    "зп_на_ср_зп_по_компании",
-                ]
-
                 # Копируем значения строки
-                info_display = row_info[columns_to_show].iloc[0].copy()
+                info_display = row_info[COLUMNS_TO_SHOW].iloc[0].copy()
 
                 # Обрабатываем id_руководителя
                 manager_id = info_display["id_руководителя"]
@@ -340,20 +543,18 @@ def run_dashboard(excel_file: str, title: str):
                 info_display["id_руководителя"] = manager_label
 
                 # Финальный вывод
-                info_display = info_display.to_frame().reset_index()
-                info_display.columns = ["Показатель", "Значение"]
-                info_display["Значение"] = info_display["Значение"].astype(str)
-                st.table(info_display)
+                user_info_dict = info_display.to_dict()
+                render_user_card(user_info_dict)
 
             else:
-                st.info("Информация о сотруднике не найдена в main_all.csv.")
+                st.info("Информация о сотруднике в файле не найдена.")
         else:
             st.warning("Файл с информацией о сотрудниках не найден.")
 
         shap_file = (
-            Path("./python/dismissal_predict_v2/data/results/result_top_shap.csv")
+            Path("/home/root6/python/dismissal_predict_v2/data/results/result_top_shap.csv")
             if title == "top"
-            else Path("./python/dismissal_predict_v2/data/results/result_all_shap.csv")
+            else Path("/home/root6/python/dismissal_predict_v2/data/results/result_all_shap.csv")
         )
 
         if shap_file.exists():
@@ -465,24 +666,70 @@ def run_dashboard_summary(path_all, shap_path_all):
     else:
         st.warning("Файл SHAP-факторов не найден.")
 
+    plot_top_departments_by_risk(df_all, latest_date, info_file)
+    show_critical_department_profiles(df_all, info_file, latest_date, path_all)
 
-# Вкладки
-tab1, tab2, tab3 = st.tabs(["Все сотрудники", "Другие сотрудники", "По всей компании"])
 
-with tab1:
-    run_dashboard(
-        "./python/dismissal_predict_v2/data/results/result_all.xlsx",
-        title="all",
-    )
+if "user_info_json" not in st.session_state:
+    st.session_state.user_info_json = ""
 
-with tab2:
-    run_dashboard(
-        "./python/dismissal_predict_v2/data/results/result_top.xlsx",
-        title="top",
-    )
+# 🔹 Загрузка конфигурации
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    config = json.load(f)
 
-with tab3:
-    run_dashboard_summary(
-        Path("./python/dismissal_predict_v2/data/results/result_all.xlsx"),
-        Path("./python/dismissal_predict_v2/data/results/result_all_shap.csv"),
-    )
+# 🔹 Найдём нужный проект
+project_config = None
+for proj in config["projects"]:
+    if PROJECT_ID in proj:
+        project_config = proj[PROJECT_ID]
+        break
+
+if project_config is None:
+    st.error(f"Проект с ID '{PROJECT_ID}' не найден.")
+    st.stop()
+
+allowed_users = project_config.get("allowed_users", [])
+tabs_by_user = project_config.get("tabs_by_user", {})
+
+handle_auth()
+
+# 🔹 Доступ к дашборду (успешная авторизация)
+if st.session_state.login_stage == "authenticated":
+    st_autorefresh(interval=3600000, limit=None, key="auto_refresh")
+    st.title("📊 Дашборд риска увольнения сотрудников")
+
+    if info_file.exists():
+        if st.button("🔄 Обновить данные"):
+            st.rerun()
+    else:
+        st.error("❌ Файл с данными не найден")
+
+    # 🔹 Получение доступных вкладок
+    login = st.session_state.login
+    available_tabs = tabs_by_user.get(login, tabs_by_user.get("default", []))
+
+    if not available_tabs:
+        st.warning("У пользователя нет доступных вкладок.")
+        st.stop()
+
+    tabs = st.tabs(available_tabs)
+
+    for tab_name, tab in zip(available_tabs, tabs):
+        with tab:
+            if tab_name == "Все сотрудники":
+                run_dashboard(
+                    "/home/root6/python/dismissal_predict_v2/data/results/result_all.xlsx",
+                    title="all",
+                )
+            elif tab_name == "Другие сотрудники":
+                run_dashboard(
+                    "/home/root6/python/dismissal_predict_v2/data/results/result_top.xlsx",
+                    title="top",
+                )
+            elif tab_name == "По всей компании":
+                run_dashboard_summary(
+                    Path("/home/root6/python/dismissal_predict_v2/data/results/result_all.xlsx"),
+                    Path(
+                        "/home/root6/python/dismissal_predict_v2/data/results/result_all_shap.csv"
+                    ),
+                )
