@@ -58,6 +58,15 @@ TARGET_COL = "уволен"
 N_JOBS = -1
 THRESHOLDS = np.arange(0.1, 0.9, 0.02)
 
+FN_PENALTY_WEIGHT = 1
+FP_PENALTY_WEIGHT = 0.02
+FN_WEIGHT = 0.85
+FP_WEIGHT = 0.15
+
+# FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
+# FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
+# FN_WEIGHT и FP_WEIGHT: Увеличение веса для FN и уменьшение для FP помогает сбалансировать итоговый результат.
+
 warnings.filterwarnings("ignore")
 
 main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
@@ -73,9 +82,9 @@ def get_confusion_counts(cm):
 
 
 def custom_metric_from_counts(tp, tn, fn, fp):
-    fn_penalty = np.exp(-0.35 * fn)
-    fp_penalty = np.exp(-0.08 * fp)
-    score = fn_penalty * 0.75 + fp_penalty * 0.25
+    fn_penalty = np.exp(-FN_PENALTY_WEIGHT * fn)
+    fp_penalty = np.exp(-FP_PENALTY_WEIGHT * fp)
+    score = fn_penalty * FN_WEIGHT + fp_penalty * FP_WEIGHT
     return round(score, 6)
 
 
@@ -645,6 +654,10 @@ def log_with_mlflow(
                 "N_SPLITS": N_SPLITS,
                 "METRIC": METRIC,
                 "TARGET_COL": TARGET_COL,
+                "FN_PENALTY_WEIGHT": FN_PENALTY_WEIGHT,
+                "FP_PENALTY_WEIGHT": FP_PENALTY_WEIGHT,
+                "FN_WEIGHT": FN_WEIGHT,
+                "FP_WEIGHT": FP_WEIGHT,
             }
 
             with open("experiment_config.json", "w") as f:

@@ -192,7 +192,7 @@ class DataPreprocessor:
 
         df_transformed = self.preprocessor.fit_transform(df)
         df_transformed = pd.DataFrame(
-            df_transformed, columns=self.preprocessor.get_feature_names_out()
+            df_transformed, columns=self.preprocessor.get_feature_names_out() # type: ignore
         )
 
         if uvolen_series is not None:
