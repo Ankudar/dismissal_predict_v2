@@ -46,8 +46,8 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.25
 RANDOM_STATE = 40
-N_TRIALS = 5000  # итерации для оптуны
-N_TRIALS_FOR_TOP = 1000
+N_TRIALS = 10  # итерации для оптуны
+N_TRIALS_FOR_TOP = 2
 N_SPLITS = 5  # число кроссвалидаций
 METRIC = "custom"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
@@ -56,12 +56,14 @@ MLFLOW_EXPERIMENT_TOP = "top_users"
 TARGET_COL = "уволен"
 
 N_JOBS = -1
-THRESHOLDS = np.arange(0.1, 0.9, 0.02)
+THRESHOLDS = np.arange(0.1, 0.9, 0.01)
 
-FN_PENALTY_WEIGHT = 1
-FP_PENALTY_WEIGHT = 0.02
-FN_WEIGHT = 0.85
-FP_WEIGHT = 0.15
+FN_PENALTY_WEIGHT = 3
+FP_PENALTY_WEIGHT = 1
+FN_WEIGHT = 1.5
+FP_WEIGHT = 0.5
+
+MIN_PRECISION = 0.3
 
 # FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
 # FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
@@ -73,19 +75,21 @@ main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
+def custom_metric_from_counts(tp, tn, fn, fp):
+    fn_penalty = np.exp(-FN_PENALTY_WEIGHT * fn)
+    fp_penalty = np.exp(-FP_PENALTY_WEIGHT * fp)
+    score = fn_penalty * FN_WEIGHT + fp_penalty * FP_WEIGHT
+    max_score = FN_WEIGHT + FP_WEIGHT
+    normalized_score = score / max_score
+    return round(normalized_score, 6)
+
+
 def get_confusion_counts(cm):
     if cm.shape == (2, 2):
         tn, fp, fn, tp = cm.ravel()
     else:
         tn, fp, fn, tp = get_confusion_counts(cm)
     return tn, fp, fn, tp
-
-
-def custom_metric_from_counts(tp, tn, fn, fp):
-    fn_penalty = np.exp(-FN_PENALTY_WEIGHT * fn)
-    fp_penalty = np.exp(-FP_PENALTY_WEIGHT * fp)
-    score = fn_penalty * FN_WEIGHT + fp_penalty * FP_WEIGHT
-    return round(score, 6)
 
 
 def is_new_model_better(new_metrics, old_metrics, delta=0.001):
@@ -148,7 +152,7 @@ def objective(trial, X_train, y_train, all_columns):
             "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
             "criterion": trial.suggest_categorical("criterion", ["gini", "entropy"]),
             "class_weight": trial.suggest_categorical(
-                "class_weight", ["balanced", "balanced_subsample", None]
+                "class_weight", ["balanced", "balanced_subsample", {0: 1, 1: 3}, None]
             ),
             "bootstrap": True,
         }
@@ -166,24 +170,26 @@ def objective(trial, X_train, y_train, all_columns):
             model.fit(X_tr, y_tr)
             y_proba = model.predict_proba(X_val)[:, 1]
 
-            MIN_PRECISION = 0.5
-            FN_THRESHOLD_RATIO = 0.01
+            best_fp = float("inf")
+            best_fn = float("inf")
             best_score = -np.inf
             best_threshold = 0.5
-
-            max_fn_allowed = max(3, int(np.ceil(FN_THRESHOLD_RATIO * np.sum(y_val == 1))))
 
             for t in THRESHOLDS:
                 y_pred_t = (y_proba >= t).astype(int)
                 cm_t = confusion_matrix(y_val, y_pred_t, labels=[0, 1])
                 tn, fp, fn, tp = get_confusion_counts(cm_t)
 
-                precision_t = precision_score(y_val, y_pred_t, zero_division=0)
-
-                if fn > max_fn_allowed or precision_t < MIN_PRECISION:
+                # Жёсткое ограничение FN
+                if fn > 5:
                     continue
 
-                # Выбор метрики
+                # Ограничение по precision
+                precision_t = precision_score(y_val, y_pred_t, zero_division=0)
+                if precision_t < MIN_PRECISION:
+                    continue
+
+                # Основная метрика
                 if METRIC == "f1":
                     score_t = f1_score(y_val, y_pred_t, zero_division=0)
                 elif METRIC == "accuracy":
@@ -199,7 +205,14 @@ def objective(trial, X_train, y_train, all_columns):
                 else:
                     score_t = recall_score(y_val, y_pred_t)
 
-                if score_t > best_score:
+                # Приоритет: мминимальный FN → инимальный FP → лучший score
+                if (
+                    fn < best_fn
+                    or (fn == best_fn and fp < best_fp)
+                    or (fn == best_fn and fp == best_fp and score_t > best_score)
+                ):
+                    best_fp = fp
+                    best_fn = fn
                     best_score = score_t
                     best_threshold = t
 
