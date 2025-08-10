@@ -1,4 +1,5 @@
 from datetime import datetime
+from itertools import product
 import json
 import logging
 import os
@@ -46,7 +47,7 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.25
 RANDOM_STATE = 40
-N_TRIALS = 10  # итерации для оптуны
+N_TRIALS = 100  # итерации для оптуны
 N_TRIALS_FOR_TOP = 2
 N_SPLITS = 5  # число кроссвалидаций
 METRIC = "custom"
@@ -58,16 +59,19 @@ TARGET_COL = "уволен"
 N_JOBS = -1
 THRESHOLDS = np.arange(0.1, 0.9, 0.01)
 
-FN_PENALTY_WEIGHT = 3
+FN_PENALTY_WEIGHT = 4
 FP_PENALTY_WEIGHT = 1
-FN_WEIGHT = 1.5
-FP_WEIGHT = 0.5
-
-MIN_PRECISION = 0.3
+FN_WEIGHT = 0.7
+FP_WEIGHT = 0.3
 
 # FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
 # FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
 # FN_WEIGHT и FP_WEIGHT: Увеличение веса для FN и уменьшение для FP помогает сбалансировать итоговый результат.
+
+MIN_PRECISION = 0.33
+FN_STOP = 2  # Жёсткое ограничение FN для подбора трешхолда
+MAX_FN_SOFT = 1  # Мягкое ограничение FN уже непосредственно в модели обучения
+
 
 warnings.filterwarnings("ignore")
 
@@ -145,16 +149,16 @@ def objective(trial, X_train, y_train, all_columns):
         trial.set_user_attr("n_selected_features", len(selected_features))
 
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 200, 400, step=50),
-            "max_depth": trial.suggest_int("max_depth", 4, 12),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 1000, step=50),
+            "max_depth": trial.suggest_int("max_depth", 4, 20),
             "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 2, 6),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 2, 10),
             "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
             "criterion": trial.suggest_categorical("criterion", ["gini", "entropy"]),
             "class_weight": trial.suggest_categorical(
-                "class_weight", ["balanced", "balanced_subsample", {0: 1, 1: 3}, None]
+                "class_weight", ["balanced", "balanced_subsample", None]
             ),
-            "bootstrap": True,
+            "bootstrap": trial.suggest_categorical("bootstrap", [True, False]),
         }
 
         skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
@@ -180,16 +184,14 @@ def objective(trial, X_train, y_train, all_columns):
                 cm_t = confusion_matrix(y_val, y_pred_t, labels=[0, 1])
                 tn, fp, fn, tp = get_confusion_counts(cm_t)
 
-                # Жёсткое ограничение FN
-                if fn > 5:
+                if fn > FN_STOP:
                     continue
 
-                # Ограничение по precision
                 precision_t = precision_score(y_val, y_pred_t, zero_division=0)
                 if precision_t < MIN_PRECISION:
                     continue
 
-                # Основная метрика
+                score_t = None
                 if METRIC == "f1":
                     score_t = f1_score(y_val, y_pred_t, zero_division=0)
                 elif METRIC == "accuracy":
@@ -203,10 +205,15 @@ def objective(trial, X_train, y_train, all_columns):
                 elif METRIC == "custom":
                     score_t = custom_metric_from_counts(tp, tn, fn, fp)
                 else:
+                    logger.warning(
+                        f"Неизвестная метрика '{METRIC}', используем recall по умолчанию"
+                    )
                     score_t = recall_score(y_val, y_pred_t)
 
-                # Приоритет: мминимальный FN → инимальный FP → лучший score
-                if (
+                if score_t is None:
+                    continue
+
+                if fn <= best_fn + MAX_FN_SOFT and (
                     fn < best_fn
                     or (fn == best_fn and fp < best_fp)
                     or (fn == best_fn and fp == best_fp and score_t > best_score)
@@ -223,7 +230,7 @@ def objective(trial, X_train, y_train, all_columns):
             precisions.append(precision_score(y_val, y_pred, zero_division=0))
             f1s.append(f1_score(y_val, y_pred, zero_division=0))
             accuracies.append(accuracy_score(y_val, y_pred))
-            roc_auc.append(roc_auc_score(y_val, y_pred))
+            roc_auc.append(roc_auc_score(y_val, y_proba))
 
             cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
             tn, fp, fn, tp = get_confusion_counts(cm)
@@ -441,6 +448,8 @@ def log_with_mlflow(
 ):
     try:
         n_selected_features = len(selected_features)
+        cm_test = confusion_matrix(y_test, y_pred, labels=[0, 1])
+        tn, fp, fn, tp = get_confusion_counts(cm_test)
 
         if mlflow.active_run():
             mlflow.end_run()
@@ -458,6 +467,8 @@ def log_with_mlflow(
             )
 
             mlflow.log_param("opt_metric", f"{metric}")
+            mlflow.log_metric("fn_test", fn)
+            mlflow.log_metric("fp_test", fp)
 
             mlflow.log_metric("f1_train", round(final_metrics_train["f1"], 3))
             mlflow.log_metric("f1_test", round(final_metrics["f1"], 3))
@@ -671,6 +682,8 @@ def log_with_mlflow(
                 "FP_PENALTY_WEIGHT": FP_PENALTY_WEIGHT,
                 "FN_WEIGHT": FN_WEIGHT,
                 "FP_WEIGHT": FP_WEIGHT,
+                "MIN_PRECISION": MIN_PRECISION,
+                "FN_STOP": FN_STOP,
             }
 
             with open("experiment_config.json", "w") as f:
