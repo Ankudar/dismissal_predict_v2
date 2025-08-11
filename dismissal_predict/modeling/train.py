@@ -59,20 +59,6 @@ TARGET_COL = "уволен"
 N_JOBS = -1
 THRESHOLDS = np.arange(0.1, 0.9, 0.01)
 
-FN_PENALTY_WEIGHT = 4
-FP_PENALTY_WEIGHT = 1
-FN_WEIGHT = 0.7
-FP_WEIGHT = 0.3
-
-# FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
-# FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
-# FN_WEIGHT и FP_WEIGHT: Увеличение веса для FN и уменьшение для FP помогает сбалансировать итоговый результат.
-
-MIN_PRECISION = 0.33
-FN_STOP = 2  # Жёсткое ограничение FN для подбора трешхолда
-MAX_FN_SOFT = 1  # Мягкое ограничение FN уже непосредственно в модели обучения
-
-
 warnings.filterwarnings("ignore")
 
 main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
@@ -719,7 +705,7 @@ def today():
 if __name__ == "__main__":
     mlflow.set_tracking_uri("file:///home/root6/python/dismissal_predict_v2/mlruns")
 
-    # Преобразуем данные
+    # Преобразуем данные один раз
     main_users = convert_all_to_float(main_users, exclude_cols=[TARGET_COL])
     top_users = convert_all_to_float(top_users, exclude_cols=[TARGET_COL])
     main_users[TARGET_COL] = (
@@ -728,8 +714,6 @@ if __name__ == "__main__":
     top_users[TARGET_COL] = (
         pd.to_numeric(top_users[TARGET_COL], errors="coerce").fillna(0).astype(int)
     )
-
-    # Удаляем дубликаты
     main_users = main_users.drop_duplicates()
     top_users = top_users.drop_duplicates()
 
@@ -738,34 +722,64 @@ if __name__ == "__main__":
     X_top = top_users.drop(columns=[TARGET_COL])
     y_top = top_users[TARGET_COL]
 
-    X_train_main, X_test_main, y_train_main, y_test_main = train_test_split(
-        X_main, y_main, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_main
-    )
+    # Сетка параметров
+    fn_penalty_grid = range(1, 2)  # первое входит, второе нет
+    fp_penalty_grid = range(1, 2)
+    fn_stop_grid = range(2, 3)
+    max_fn_soft_grid = range(2, 3)
 
-    run_optuna_experiment(
-        X_train=X_train_main,
-        y_train=y_train_main,
-        X_test=X_test_main,
-        y_test=y_test_main,
-        metric=METRIC,
-        n_trials=N_TRIALS,
-        experiment_name=MLFLOW_EXPERIMENT_MAIN,
-        model_output_path=f"{MODELS}/main_users.pkl",
-        current_time=today(),
-    )
+    # FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
+    # FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
+    # FN_WEIGHT и FP_WEIGHT: Увеличение веса для FN и уменьшение для FP помогает сбалансировать итоговый результат.
+    # FN_STOP = 2  # Жёсткое ограничение FN для подбора трешхолда
+    # MAX_FN_SOFT = 1  # Мягкое ограничение FN уже непосредственно в модели обучения
 
-    X_train_top, X_test_top, y_train_top, y_test_top = train_test_split(
-        X_top, y_top, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_top
-    )
+    for fn_penalty, fp_penalty, fn_stop_val, max_fn_soft_val in product(
+        fn_penalty_grid, fp_penalty_grid, fn_stop_grid, max_fn_soft_grid
+    ):
+        # Устанавливаем глобальные параметры
+        FN_PENALTY_WEIGHT = fn_penalty
+        FP_PENALTY_WEIGHT = fp_penalty
+        FN_WEIGHT = 0.7
+        FP_WEIGHT = 0.3
+        MIN_PRECISION = 0.34
+        FN_STOP = fn_stop_val
+        MAX_FN_SOFT = max_fn_soft_val
 
-    run_optuna_experiment(
-        X_train=X_train_top,
-        y_train=y_train_top,
-        X_test=X_test_top,
-        y_test=y_test_top,
-        metric=METRIC,
-        n_trials=N_TRIALS_FOR_TOP,
-        experiment_name=MLFLOW_EXPERIMENT_TOP,
-        model_output_path=f"{MODELS}/top_users.pkl",
-        current_time=today(),
-    )
+        logger.info(
+            f"=== Запуск с параметрами: FN_PENALTY_WEIGHT={FN_PENALTY_WEIGHT}, "
+            f"FP_PENALTY_WEIGHT={FP_PENALTY_WEIGHT}, FN_STOP={FN_STOP}, MAX_FN_SOFT={MAX_FN_SOFT} ==="
+        )
+
+        # train/test split
+        X_train_main, X_test_main, y_train_main, y_test_main = train_test_split(
+            X_main, y_main, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_main
+        )
+
+        run_optuna_experiment(
+            X_train=X_train_main,
+            y_train=y_train_main,
+            X_test=X_test_main,
+            y_test=y_test_main,
+            metric=METRIC,
+            n_trials=N_TRIALS,
+            experiment_name=f"{MLFLOW_EXPERIMENT_MAIN}",
+            model_output_path=f"{MODELS}/main_users.pkl",
+            current_time=today(),
+        )
+
+        X_train_top, X_test_top, y_train_top, y_test_top = train_test_split(
+            X_top, y_top, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_top
+        )
+
+        run_optuna_experiment(
+            X_train=X_train_top,
+            y_train=y_train_top,
+            X_test=X_test_top,
+            y_test=y_test_top,
+            metric=METRIC,
+            n_trials=N_TRIALS_FOR_TOP,
+            experiment_name=f"{MLFLOW_EXPERIMENT_TOP}",
+            model_output_path=f"{MODELS}/top_users.pkl",
+            current_time=today(),
+        )
