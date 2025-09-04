@@ -47,8 +47,8 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.25
 RANDOM_STATE = 40
-N_TRIALS = 100  # итерации для оптуны
-N_TRIALS_FOR_TOP = 2
+N_TRIALS = 2000  # итерации для оптуны
+N_TRIALS_FOR_TOP = 200
 N_SPLITS = 5  # число кроссвалидаций
 METRIC = "custom"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
@@ -99,7 +99,7 @@ def is_new_model_better(new_metrics, old_metrics, delta=0.001):
 
 def manual_optuna_progress(study, n_trials, func):
     for _ in tqdm(range(n_trials), desc="Optuna Tuning"):
-        study.optimize(func, n_trials=1, catch=(Exception,), n_jobs=N_JOBS)
+        study.optimize(func, n_trials=1, catch=(Exception,))
 
 
 def convert_all_to_float(df: pd.DataFrame, exclude_cols=None):
@@ -135,10 +135,10 @@ def objective(trial, X_train, y_train, all_columns):
         trial.set_user_attr("n_selected_features", len(selected_features))
 
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 200, 1000, step=50),
-            "max_depth": trial.suggest_int("max_depth", 4, 20),
-            "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 2, 10),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 2000, step=50),
+            "max_depth": trial.suggest_int("max_depth", 3, 50),
+            "min_samples_split": trial.suggest_int("min_samples_split", 1, 10),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 10),
             "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
             "criterion": trial.suggest_categorical("criterion", ["gini", "entropy"]),
             "class_weight": trial.suggest_categorical(
@@ -670,6 +670,7 @@ def log_with_mlflow(
                 "FP_WEIGHT": FP_WEIGHT,
                 "MIN_PRECISION": MIN_PRECISION,
                 "FN_STOP": FN_STOP,
+                "MAX_FN_SOFT": MAX_FN_SOFT,
             }
 
             with open("experiment_config.json", "w") as f:
@@ -723,16 +724,16 @@ if __name__ == "__main__":
     y_top = top_users[TARGET_COL]
 
     # Сетка параметров
-    fn_penalty_grid = range(1, 2)  # первое входит, второе нет
+    fn_penalty_grid = range(2, 3)  # первое входит, второе нет
     fp_penalty_grid = range(1, 2)
-    fn_stop_grid = range(2, 3)
-    max_fn_soft_grid = range(2, 3)
+    fn_stop_grid = range(3, 4)
+    max_fn_soft_grid = range(1, 2)
 
     # FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
     # FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
     # FN_WEIGHT и FP_WEIGHT: Увеличение веса для FN и уменьшение для FP помогает сбалансировать итоговый результат.
-    # FN_STOP = 2  # Жёсткое ограничение FN для подбора трешхолда
-    # MAX_FN_SOFT = 1  # Мягкое ограничение FN уже непосредственно в модели обучения
+    # FN_STOP # Жёсткое ограничение FN для подбора трешхолда
+    # MAX_FN_SOFT # Мягкое ограничение FN уже непосредственно в модели обучения
 
     for fn_penalty, fp_penalty, fn_stop_val, max_fn_soft_val in product(
         fn_penalty_grid, fp_penalty_grid, fn_stop_grid, max_fn_soft_grid
@@ -742,7 +743,7 @@ if __name__ == "__main__":
         FP_PENALTY_WEIGHT = fp_penalty
         FN_WEIGHT = 0.7
         FP_WEIGHT = 0.3
-        MIN_PRECISION = 0.34
+        MIN_PRECISION = 0.3
         FN_STOP = fn_stop_val
         MAX_FN_SOFT = max_fn_soft_val
 

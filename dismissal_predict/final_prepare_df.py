@@ -8,12 +8,8 @@ import numpy as np
 import pandas as pd
 from rusgenderdetection import get_gender  # type: ignore
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import (
-    OneHotEncoder,
-    OrdinalEncoder,
-    RobustScaler,
-    StandardScaler,
-)
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, RobustScaler
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 logging.basicConfig(level=logging.INFO)
@@ -35,12 +31,10 @@ DROP_COLS = [
     "имя",
     "фамилия",
     "фио",
-    "должность",
     "дата_увольнения",
     "дата_рождения",
     "дата_приема_в_1с",
     "текущая_должность_на_портале",
-    "отдел",
     "уровень_зп",
     "грейд",
     "число_детей",
@@ -48,6 +42,7 @@ DROP_COLS = [
     "зп_на_число_детей",
     "id_руководителя",
     "зп_на_ср_зп_по_компании",
+    "зп_к_возрасту",
 ]
 
 FLOAT_COLS = ["тон", "увольнение", "оффер", "вредительство", "личная жизнь", "стресс", "конфликты"]
@@ -173,8 +168,8 @@ class DataPreprocessor:
 
         df = self._handle_nans(df)
 
-        onehot_cols = [col for col in self.cat_cols if df[col].nunique() <= 10]
-        ordinal_cols = [col for col in self.cat_cols if df[col].nunique() > 10]
+        onehot_cols = [col for col in self.cat_cols if df[col].nunique() <= 15]
+        ordinal_cols = [col for col in self.cat_cols if df[col].nunique() > 15]
 
         self.onehot_encoder = OneHotEncoder(
             handle_unknown="ignore", sparse_output=False, drop="first"
@@ -184,8 +179,17 @@ class DataPreprocessor:
         self.preprocessor = ColumnTransformer(
             transformers=[
                 ("onehot", self.onehot_encoder, onehot_cols),
-                ("ordinal", self.ordinal_encoder, ordinal_cols),
-                ("num", RobustScaler(), self.numeric_cols),
+                (
+                    "ordinal_scaled",
+                    Pipeline(
+                        [
+                            ("ordinal", self.ordinal_encoder),
+                            ("scaler", RobustScaler()),
+                        ]
+                    ),
+                    ordinal_cols,
+                ),
+                ("num_scaled", RobustScaler(), self.numeric_cols),
             ],
             remainder="drop",
         )
@@ -423,27 +427,37 @@ def main_prepare_for_all(main_users, users_salary, users_cadr, children):
 
         main_users["зп_к_возрасту"] = main_users["ср_зп"] / (main_users["возраст"] + 1)
         main_users["зп_к_стажу"] = main_users["ср_зп"] / (main_users["стаж"] + 1)
-        # main_users["стаж_к_возрасту"] = main_users["стаж"] / (main_users["возраст"] + 1)
 
+        # РАЗДЕЛЬНАЯ ОБРАБОТКА ФАЙЛОВ:
         main_all_path = f"{DATA_PROCESSED}/main_all.csv"
-        main_users_updated = update_existing_data(main_users, main_all_path, id_col="id")
-        main_users_updated.to_csv(main_all_path, index=False)
-        main_users_updated.to_csv(
-            f"{DATA_PROCESSED}/main_all_history_do_not_tuch.csv", index=False
+        history_path = f"{DATA_PROCESSED}/main_all_history_do_not_tuch.csv"
+
+        # 1. ОБНОВЛЯЕМ ОСНОВНОЙ ФАЙЛ (только актуальные данные)
+        main_users_updated = update_existing_data(
+            main_users, main_all_path, id_col="id", preserve_history=False
         )
+        main_users_updated.to_csv(main_all_path, index=False)
+
+        # 2. ОБНОВЛЯЕМ ИСТОРИЧЕСКИЙ ФАЙЛ (все данные за всю историю)
+        main_users_history = update_existing_data(
+            main_users, history_path, id_col="id", preserve_history=True
+        )
+        main_users_history.to_csv(history_path, index=False)
 
         preprocessor = DataPreprocessor()
-        main_users_for_train = preprocessor.fit(main_users_updated)
+        main_users_for_train = preprocessor.fit(
+            main_users_updated
+        )  # Используем актуальные данные для обучения
 
         # Проверка и удаление строк с NaN
         nan_rows = main_users_for_train.isnull().any(axis=1)
         n_removed = nan_rows.sum()
 
         if n_removed > 0:
-            print("Обнаружены NaN в строках — удаляем:")
+            print("Обнаружены NaN в строках — заменяем на -1:")
             print(main_users_for_train.isnull().sum()[main_users_for_train.isnull().any()])
-            main_users_for_train = main_users_for_train[~nan_rows]
-            print(f"Удалено строк: {n_removed}")
+            main_users_for_train = main_users_for_train.fillna(-1)
+            print(f"Заменено строк: {n_removed}")
         else:
             print("NaN не обнаружены в main_all_for_train — удаление не требуется.")
 
@@ -470,9 +484,19 @@ def prepare_with_mic():
             main_top[col] = main_top[col].fillna(main_top[col].median())
 
     main_top_path = f"{DATA_PROCESSED}/main_top.csv"
-    main_top_updated = update_existing_data(main_top, main_top_path, id_col="id")
+    history_top_path = f"{DATA_PROCESSED}/main_top_history_do_not_tuch.csv"
+
+    # ОБНОВЛЯЕМ ОСНОВНОЙ ФАЙЛ
+    main_top_updated = update_existing_data(
+        main_top, main_top_path, id_col="id", preserve_history=False
+    )
     main_top_updated.to_csv(main_top_path, index=False)
-    main_top_updated.to_csv(f"{DATA_PROCESSED}/main_top_history_do_not_tuch.csv", index=False)
+
+    # ОБНОВЛЯЕМ ИСТОРИЧЕСКИЙ ФАЙЛ
+    main_top_history = update_existing_data(
+        main_top, history_top_path, id_col="id", preserve_history=True
+    )
+    main_top_history.to_csv(history_top_path, index=False)
 
     preprocessor_top = DataPreprocessor()
     main_top_for_train = preprocessor_top.fit(main_top_updated)
@@ -482,10 +506,10 @@ def prepare_with_mic():
     n_removed = nan_rows.sum()
 
     if n_removed > 0:
-        print("Обнаружены NaN в строках main_top_for_train — удаляем:")
+        print("Обнаружены NaN в строках — заменяем на -1:")
         print(main_top_for_train.isnull().sum()[main_top_for_train.isnull().any()])
-        main_top_for_train = main_top_for_train[~nan_rows]
-        print(f"Удалено строк: {n_removed}")
+        main_top_for_train = main_top_for_train.fillna(-1)
+        print(f"Заменено строк: {n_removed}")
     else:
         print("NaN не обнаружены в main_top_for_train — удаление не требуется.")
 
@@ -545,7 +569,7 @@ def calc_target_correlations(df, target_col: str = "уволен", file_path: st
     # --- VIF ---
     vif_cols = [col for col in numeric_cols if col != target_col and col not in DROP_COLS]
     X_vif = df_tmp[vif_cols].copy()
-    scaler = StandardScaler()
+    scaler = RobustScaler()
     X_scaled = pd.DataFrame(scaler.fit_transform(X_vif), columns=vif_cols)
 
     vif_data = pd.DataFrame()
@@ -566,12 +590,31 @@ def calc_target_correlations(df, target_col: str = "уволен", file_path: st
 
 
 def update_existing_data(
-    new_df: pd.DataFrame, existing_path: str, id_col: str = "id"
+    new_df: pd.DataFrame, existing_path: str, id_col: str = "id", preserve_history: bool = False
 ) -> pd.DataFrame:
+    """
+    Обновляет существующие данные, сохраняя исторические значения.
+
+    Parameters:
+    -----------
+    new_df : pd.DataFrame
+        Новые данные для добавления/обновления
+    existing_path : str
+        Путь к существующему файлу
+    id_col : str
+        Название колонки с идентификатором
+    preserve_history : bool
+        Если True, сохраняет все исторические записи (даже удаленные)
+
+    Returns:
+    --------
+    pd.DataFrame
+        Обновленный DataFrame
+    """
     if os.path.exists(existing_path):
         old_df = pd.read_csv(existing_path, delimiter=",", decimal=",")
 
-        # Явное приведение id к строке или int (рекомендуется int, если id — числовой)
+        # Явное приведение id к строке
         old_df[id_col] = old_df[id_col].astype(str)
         new_df[id_col] = new_df[id_col].astype(str)
 
@@ -584,28 +627,46 @@ def update_existing_data(
         old_df = old_df.drop_duplicates(subset=[id_col])
         new_df = new_df.drop_duplicates(subset=[id_col])
 
-        old_df.set_index(id_col, inplace=True)
-        new_df.set_index(id_col, inplace=True)
+        if preserve_history:
+            # РЕЖИМ СОХРАНЕНИЯ ИСТОРИИ: объединяем все данные
+            # Сохраняем все записи из старого файла и добавляем/обновляем новые
+            old_df.set_index(id_col, inplace=True)
+            new_df.set_index(id_col, inplace=True)
 
-        old_df = old_df.sort_index().sort_index(axis=1)
-        new_df = new_df.sort_index().sort_index(axis=1)
+            # Обновляем существующие записи
+            updated_df = old_df.copy()
+            updated_df.update(new_df, overwrite=True)
 
-        # Сравнение
-        common_index = old_df.index.intersection(new_df.index)
-        old_common = old_df.loc[common_index]
-        new_common = new_df.loc[common_index]
+            # Добавляем полностью новые записи
+            new_ids = new_df.index.difference(old_df.index)
+            if not new_ids.empty:
+                updated_df = pd.concat([updated_df, new_df.loc[new_ids]])
 
-        comparison = old_common.fillna("NAN") != new_common.fillna("NAN")
-        changed_mask = comparison.any(axis=1)
+            updated_df = updated_df.reset_index()
+        else:
+            # ОБЫЧНЫЙ РЕЖИМ: только актуальные данные
+            old_df.set_index(id_col, inplace=True)
+            new_df.set_index(id_col, inplace=True)
 
-        updated_df = old_df.copy()
-        updated_df.update(new_common[changed_mask])
+            old_df = old_df.sort_index().sort_index(axis=1)
+            new_df = new_df.sort_index().sort_index(axis=1)
 
-        new_ids = new_df.index.difference(old_df.index)
-        if not new_ids.empty:
-            updated_df = pd.concat([updated_df, new_df.loc[new_ids]])
+            # Сравнение
+            common_index = old_df.index.intersection(new_df.index)
+            old_common = old_df.loc[common_index]
+            new_common = new_df.loc[common_index]
 
-        updated_df = updated_df.reset_index()
+            comparison = old_common.fillna("NAN") != new_common.fillna("NAN")
+            changed_mask = comparison.any(axis=1)
+
+            updated_df = old_df.copy()
+            updated_df.update(new_common[changed_mask])
+
+            new_ids = new_df.index.difference(old_df.index)
+            if not new_ids.empty:
+                updated_df = pd.concat([updated_df, new_df.loc[new_ids]])
+
+            updated_df = updated_df.reset_index()
     else:
         updated_df = new_df.copy()
 

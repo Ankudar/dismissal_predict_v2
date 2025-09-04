@@ -14,9 +14,12 @@ from config import MAIN_CONFIGS, Config
 # import getpasspip
 import pandas as pd
 from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO)
@@ -72,8 +75,11 @@ def get_latest_file(directory):
 
 
 def login(driver, username, password, auth_url=None):
+    # Настройки времени ожидания
+    WAIT_TIMEOUT = 30  # секунд
+
     # Выбор селекторов в зависимости от URL
-    if auth_url and "user_admin" in auth_url or auth_url and "i_employees_children" in auth_url:
+    if auth_url and ("user_admin" in auth_url or "i_employees_children" in auth_url):
         # Страница с Bitrix user_admin
         login_selector = "#authorize > div > div:nth-child(3) > div.login-input-wrap > input"
         password_selector = "#authorize_password > div.login-input-wrap > input"
@@ -86,14 +92,38 @@ def login(driver, username, password, auth_url=None):
             "#workarea-content > div > div > form > div:nth-child(4) > div:nth-child(2) > input"
         )
 
-    login_input = driver.find_element(By.CSS_SELECTOR, login_selector)
-    login_input.send_keys(username)
+    try:
+        # Ожидание появления поля логина
+        login_input = WebDriverWait(driver, WAIT_TIMEOUT).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, login_selector))
+        )
+        login_input.clear()
+        login_input.send_keys(username)
 
-    password_input = driver.find_element(By.CSS_SELECTOR, password_selector)
-    password_input.send_keys(password)
-    password_input.send_keys(Keys.RETURN)
+        # Ожидание появления поля пароля
+        password_input = WebDriverWait(driver, WAIT_TIMEOUT).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, password_selector))
+        )
+        password_input.clear()
+        password_input.send_keys(password)
+        password_input.send_keys(Keys.RETURN)
 
-    time.sleep(2)
+        # Ожидание завершения авторизации (можно настроить под ожидание конкретного элемента после входа)
+        WebDriverWait(driver, WAIT_TIMEOUT).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+
+        # Короткая пауза для стабилизации
+        time.sleep(2)
+
+        logger.info("Авторизация прошла успешно")
+
+    except TimeoutException:
+        logger.error("Таймаут при ожидании элементов авторизации")
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка при авторизации: {e}")
+        raise
 
 
 def get_driver():
@@ -111,48 +141,105 @@ def get_driver():
 
 def get_portal_users(auth_url):
     logger.info("Загрузка пользователей с портала")
-    # auth_url = "http://next.portal.local/bitrix/admin/user_admin.php?lang=ru#authorize"
+
+    # Настройки времени ожидания (в секундах)
+    PAGE_LOAD_TIMEOUT = 60  # время ожидания загрузки страницы
+    IMPLICIT_WAIT = 30  # неявное ожидание элементов
+    EXPLICIT_WAIT = 60  # явное ожидание для конкретных элементов
+    DOWNLOAD_WAIT = 120  # время ожидания скачивания файла
+
     driver = None
     try:
         driver = get_driver()
+
+        # Установка таймаутов
+        driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+        driver.implicitly_wait(IMPLICIT_WAIT)
+
+        # Загрузка страницы авторизации
         driver.get(auth_url)
+
+        # Авторизация
         login(driver, portal_login, portal_password, auth_url=auth_url)
+
+        # Повторная загрузка страницы после авторизации
         driver.get(auth_url)
+
+        # Явное ожидание загрузки страницы (можно настроить под конкретные элементы)
+        try:
+            WebDriverWait(driver, EXPLICIT_WAIT).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+        except Exception as e:
+            logger.warning(f"Таймаут ожидания загрузки страницы: {e}")
+
+        # Ожидание скачивания файла
         downloads_path = os.path.expanduser("~/Downloads")
 
-        files = os.listdir(downloads_path)
-        files = [f for f in files if f.endswith(".xls") or f.endswith(".xlsx")]
+        # Ждем появления файла в течение DOWNLOAD_WAIT секунд
+        start_time = time.time()
+        file_found = False
 
-        if not files:
-            logger.info("Нет загруженных файлов.")
+        while time.time() - start_time < DOWNLOAD_WAIT:
+            files = os.listdir(downloads_path)
+            xls_files = [f for f in files if f.endswith((".xls", ".xlsx"))]
+
+            if xls_files:
+                file_found = True
+                break
+
+            time.sleep(5)  # проверяем каждые 5 секунд
+
+        if not file_found:
+            logger.error("Файл не был загружен в течение отведенного времени")
             return
 
-        latest_file = max([os.path.join(downloads_path, f) for f in files], key=os.path.getctime)
+        # Находим самый свежий файл
+        xls_files = [f for f in os.listdir(downloads_path) if f.endswith((".xls", ".xlsx"))]
+        latest_file = max(
+            [os.path.join(downloads_path, f) for f in xls_files], key=os.path.getctime
+        )
 
+        # Дополнительная проверка, что файл полностью загружен
+        file_size = -1
+        while True:
+            current_size = os.path.getsize(latest_file)
+            if current_size == file_size:
+                break  # размер файла стабилизировался
+            file_size = current_size
+            time.sleep(2)
+
+        # Обработка файла
         temp_file_path = os.path.join(DATA_RAW, "main_users.html")
         shutil.copy(latest_file, temp_file_path)
 
+        # Чтение и сохранение данных
         df_list = pd.read_html(temp_file_path)
         if df_list:
             df = df_list[0]
             new_file_path = os.path.join(DATA_RAW, "main_users.csv")
             df.to_csv(new_file_path, index=False)
-
             logger.info(
                 f"Файл {latest_file} скопирован в {DATA_RAW} и пересохранен как main_users.csv."
             )
         else:
-            logger.info("Не удалось найти таблицы в HTML-файле.")
+            logger.error("Не удалось найти таблицы в HTML-файле.")
+            return
 
-        os.remove(latest_file)
-        os.remove(temp_file_path)
+        # Очистка временных файлов
+        try:
+            os.remove(latest_file)
+            os.remove(temp_file_path)
+        except Exception as e:
+            logger.warning(f"Ошибка при удалении временных файлов: {e}")
 
     except Exception as e:
-        logger.info(f"Ошибка: {e}")
+        logger.error(f"Критическая ошибка: {e}")
         raise
     finally:
         if driver:
             driver.quit()
+
     logger.info("Загрузка пользователей с портала завершена")
 
 
