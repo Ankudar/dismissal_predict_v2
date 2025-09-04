@@ -267,28 +267,46 @@ def merge_fillna(left_df, right_df, on="фио"):
     return result
 
 
-def convert_dates(df):
+def convert_dates(df: pd.DataFrame) -> pd.DataFrame:
     try:
         date_columns = ["дата_рождения", "дата_увольнения", "дата_приема_в_1с"]
 
-        # Замена пропусков на '1970-01-01 00:00:00'
         for col in date_columns:
-            df[col] = df[col].fillna("1970-01-01 00:00:00")
+            if col not in df.columns:
+                continue
 
-        # Конвертация в datetime с учетом разных форматов
-        df["дата_рождения"] = pd.to_datetime(
-            df["дата_рождения"], format="%d.%m.%Y", errors="coerce"
-        )
-        df["дата_увольнения"] = pd.to_datetime(
-            df["дата_увольнения"], format="%d.%m.%Y %H:%M:%S", errors="coerce"
-        )
-        df["дата_приема_в_1с"] = pd.to_datetime(
-            df["дата_приема_в_1с"], format="%Y-%m-%d", errors="coerce"
-        )
+            series = df[col]
+
+            # Уже datetime — пропускаем
+            if pd.api.types.is_datetime64_any_dtype(series):
+                continue
+
+            # Если большие числа (наносекунды), сохраняем исходное значение и переводим
+            if pd.api.types.is_integer_dtype(series) and series.max(skipna=True) > 1e12:
+                df[col + "_ns"] = series
+                df[col] = pd.to_datetime(series, unit="ns", errors="coerce")
+                continue
+
+            # Пробуем несколько форматов
+            parsed = pd.to_datetime(series, format="%d.%m.%Y", errors="coerce")
+
+            if parsed.isna().all():
+                parsed = pd.to_datetime(series, format="%d.%m.%Y %H:%M:%S", errors="coerce")
+
+            if parsed.isna().all():
+                parsed = pd.to_datetime(series, format="%Y-%m-%d", errors="coerce")
+
+            # Если так и не удалось — оставляем как есть, но логируем
+            if parsed.isna().all():
+                logger.warning(f"Не удалось распарсить даты в колонке {col}, сохраняю как текст")
+                df[col + "_raw"] = series
+            else:
+                df[col] = parsed
 
         return df
+
     except Exception as e:
-        logger.info(f"Ошибка при конвертации дат: {e}")
+        logger.error(f"Ошибка при конвертации дат: {e}")
         raise
 
 
@@ -589,84 +607,77 @@ def calc_target_correlations(df, target_col: str = "уволен", file_path: st
     return corr_df, vif_data
 
 
+import os
+
+import pandas as pd
+
+
 def update_existing_data(
-    new_df: pd.DataFrame, existing_path: str, id_col: str = "id", preserve_history: bool = False
+    new_df: pd.DataFrame,
+    existing_path: str,
+    id_col: str = "id",
+    preserve_history: bool = False,
 ) -> pd.DataFrame:
     """
-    Обновляет существующие данные, сохраняя исторические значения.
-
-    Parameters:
-    -----------
-    new_df : pd.DataFrame
-        Новые данные для добавления/обновления
-    existing_path : str
-        Путь к существующему файлу
-    id_col : str
-        Название колонки с идентификатором
-    preserve_history : bool
-        Если True, сохраняет все исторические записи (даже удаленные)
-
-    Returns:
-    --------
-    pd.DataFrame
-        Обновленный DataFrame
+    Обновляет существующие данные.
+    При preserve_history=True — сохраняет старые записи и обновляет только новые значения.
     """
+
     if os.path.exists(existing_path):
         old_df = pd.read_csv(existing_path, delimiter=",", decimal=",")
 
-        # Явное приведение id к строке
+        # Приводим даты и id
+        old_df = convert_dates(old_df)
         old_df[id_col] = old_df[id_col].astype(str)
         new_df[id_col] = new_df[id_col].astype(str)
 
-        # Найдём общие колонки
-        common_cols = sorted(list(set(old_df.columns).intersection(set(new_df.columns))))
+        # Общие колонки
+        common_cols = sorted(set(old_df.columns).intersection(new_df.columns))
+        old_df = old_df[common_cols].drop_duplicates(subset=[id_col]).copy()
+        new_df = new_df[common_cols].drop_duplicates(subset=[id_col]).copy()
 
-        old_df = old_df[common_cols].copy()
-        new_df = new_df[common_cols].copy()
+        # Работаем по id
+        old_df.set_index(id_col, inplace=True)
+        new_df.set_index(id_col, inplace=True)
+        updated_df = old_df.copy()
 
-        old_df = old_df.drop_duplicates(subset=[id_col])
-        new_df = new_df.drop_duplicates(subset=[id_col])
+        # Совпадающие индексы
+        common_index = old_df.index.intersection(new_df.index)
 
-        if preserve_history:
-            # РЕЖИМ СОХРАНЕНИЯ ИСТОРИИ: объединяем все данные
-            # Сохраняем все записи из старого файла и добавляем/обновляем новые
-            old_df.set_index(id_col, inplace=True)
-            new_df.set_index(id_col, inplace=True)
+        # Явное приведение проблемных колонок к datetime
+        date_cols = ["дата_увольнения", "дата_приема_в_1с", "дата_рождения"]
+        for col in date_cols:
+            if col in updated_df.columns and col in new_df.columns:
+                updated_df[col] = pd.to_datetime(updated_df[col], errors="coerce")
+                new_df[col] = pd.to_datetime(new_df[col], errors="coerce")
 
-            # Обновляем существующие записи
-            updated_df = old_df.copy()
-            updated_df.update(new_df, overwrite=True)
+        if not common_index.empty:
+            for col in new_df.columns:
+                if col not in updated_df.columns:
+                    continue
 
-            # Добавляем полностью новые записи
-            new_ids = new_df.index.difference(old_df.index)
-            if not new_ids.empty:
-                updated_df = pd.concat([updated_df, new_df.loc[new_ids]])
+                mask = new_df.loc[common_index, col].notna()
 
-            updated_df = updated_df.reset_index()
-        else:
-            # ОБЫЧНЫЙ РЕЖИМ: только актуальные данные
-            old_df.set_index(id_col, inplace=True)
-            new_df.set_index(id_col, inplace=True)
+                if mask.any():
+                    # preserve_history → обновляем только где в old_df было пусто
+                    if preserve_history:
+                        empty_mask = updated_df.loc[common_index, col].isna()
+                        final_mask = mask & empty_mask
+                        if final_mask.any():
+                            updated_df.loc[common_index[final_mask], col] = new_df.loc[
+                                common_index[final_mask], col
+                            ]
+                    else:
+                        updated_df.loc[common_index[mask], col] = new_df.loc[
+                            common_index[mask], col
+                        ]
 
-            old_df = old_df.sort_index().sort_index(axis=1)
-            new_df = new_df.sort_index().sort_index(axis=1)
+        # Новые записи
+        new_ids = new_df.index.difference(old_df.index)
+        if not new_ids.empty:
+            updated_df = pd.concat([updated_df, new_df.loc[new_ids]])
 
-            # Сравнение
-            common_index = old_df.index.intersection(new_df.index)
-            old_common = old_df.loc[common_index]
-            new_common = new_df.loc[common_index]
-
-            comparison = old_common.fillna("NAN") != new_common.fillna("NAN")
-            changed_mask = comparison.any(axis=1)
-
-            updated_df = old_df.copy()
-            updated_df.update(new_common[changed_mask])
-
-            new_ids = new_df.index.difference(old_df.index)
-            if not new_ids.empty:
-                updated_df = pd.concat([updated_df, new_df.loc[new_ids]])
-
-            updated_df = updated_df.reset_index()
+        updated_df = updated_df.reset_index()
     else:
         updated_df = new_df.copy()
 
