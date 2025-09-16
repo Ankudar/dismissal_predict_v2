@@ -53,6 +53,7 @@ N_SPLITS = 5  # число кроссвалидаций
 METRIC = "custom"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
 MLFLOW_EXPERIMENT_TOP = "top_users"
+EARLY_STOP = 100
 
 TARGET_COL = "уволен"
 
@@ -66,7 +67,7 @@ top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
 
 
 class EarlyStoppingCallback:
-    def __init__(self, patience=50, min_delta=0.001):
+    def __init__(self, patience=EARLY_STOP, min_delta=0.001):
         self.patience = patience
         self.min_delta = min_delta
         self.best_score = -np.inf
@@ -765,10 +766,10 @@ if __name__ == "__main__":
     y_top = top_users[TARGET_COL]
 
     # Сетка параметров
-    fn_penalty_grid = range(0, 3)  # первое входит, второе нет
-    fp_penalty_grid = range(0, 3)
-    fn_stop_grid = range(0, 3)
-    max_fn_soft_grid = range(0, 3)
+    fn_penalty_grid = range(4, 6)  # первое входит, второе нет
+    fp_penalty_grid = range(2, 4)
+    fn_stop_grid = range(0, 2)
+    max_fn_soft_grid = range(0, 2)
 
     # FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
     # FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
@@ -782,8 +783,8 @@ if __name__ == "__main__":
         # Устанавливаем глобальные параметры
         FN_PENALTY_WEIGHT = fn_penalty
         FP_PENALTY_WEIGHT = fp_penalty
-        FN_WEIGHT = 0.8
-        FP_WEIGHT = 0.2
+        FN_WEIGHT = 0.7
+        FP_WEIGHT = 0.3
         MIN_PRECISION = 0.3
         FN_STOP = fn_stop_val
         MAX_FN_SOFT = max_fn_soft_val
