@@ -47,8 +47,8 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.25
 RANDOM_STATE = 40
-N_TRIALS = 2000  # итерации для оптуны
-N_TRIALS_FOR_TOP = 200
+N_TRIALS = 5000  # итерации для оптуны
+N_TRIALS_FOR_TOP = 5000
 N_SPLITS = 5  # число кроссвалидаций
 METRIC = "custom"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
@@ -56,13 +56,32 @@ MLFLOW_EXPERIMENT_TOP = "top_users"
 
 TARGET_COL = "уволен"
 
-N_JOBS = -1
+N_JOBS = 1
 THRESHOLDS = np.arange(0.1, 0.9, 0.01)
 
 warnings.filterwarnings("ignore")
 
 main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
+
+
+class EarlyStoppingCallback:
+    def __init__(self, patience=50, min_delta=0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_score = -np.inf
+        self.no_improvement_count = 0
+
+    def __call__(self, study, trial):
+        if study.best_value > self.best_score + self.min_delta:
+            self.best_score = study.best_value
+            self.no_improvement_count = 0
+        else:
+            self.no_improvement_count += 1
+
+        if self.no_improvement_count >= self.patience:
+            study.stop()
+            logger.info(f"Ранняя остановка: нет улучшений {self.patience} trials")
 
 
 def custom_metric_from_counts(tp, tn, fn, fp):
@@ -78,7 +97,7 @@ def get_confusion_counts(cm):
     if cm.shape == (2, 2):
         tn, fp, fn, tp = cm.ravel()
     else:
-        tn, fp, fn, tp = get_confusion_counts(cm)
+        tn, fp, fn, tp = 0, 0, 0, 0
     return tn, fp, fn, tp
 
 
@@ -126,19 +145,15 @@ def convert_all_to_float(df: pd.DataFrame, exclude_cols=None):
 def objective(trial, X_train, y_train, all_columns):
     try:
         k_best = trial.suggest_int("k_best", 5, min(40, X_train.shape[1]))
-        selector = SelectKBest(score_func=f_classif, k=k_best)
-        X_train_sel = selector.fit_transform(X_train, y_train)
-        selected_idx = selector.get_support(indices=True)
-        selected_features = X_train.columns[selected_idx].tolist()
 
-        trial.set_user_attr("selected_features", selected_features)
-        trial.set_user_attr("n_selected_features", len(selected_features))
+        # Сохраняем имена фич до преобразования
+        feature_names = X_train.columns.tolist()
 
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 200, 2000, step=50),
             "max_depth": trial.suggest_int("max_depth", 3, 50),
-            "min_samples_split": trial.suggest_int("min_samples_split", 1, 10),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 10),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 2, 10),
             "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
             "criterion": trial.suggest_categorical("criterion", ["gini", "entropy"]),
             "class_weight": trial.suggest_categorical(
@@ -151,12 +166,24 @@ def objective(trial, X_train, y_train, all_columns):
         recalls, precisions, f1s, accuracies, roc_auc = [], [], [], [], []
         fn_list, fp_list, tn_list, tp_list = [], [], [], []
         fold_thresholds = []
+        all_selected_features = []  # Для сбора фич со всех фолдов
 
-        for train_idx, valid_idx in skf.split(X_train_sel, y_train):
-            model = RandomForestClassifier(**params)
-            X_tr, X_val = X_train_sel[train_idx], X_train_sel[valid_idx]
+        for train_idx, valid_idx in skf.split(X_train, y_train):
+            # Разделяем данные ДО feature selection
+            X_tr_raw, X_val_raw = X_train.iloc[train_idx], X_train.iloc[valid_idx]
             y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[valid_idx]
 
+            # Feature selection на ТРЕНИРОВОЧНОМ фолде (без утечки!)
+            selector = SelectKBest(score_func=f_classif, k=k_best)
+            X_tr = selector.fit_transform(X_tr_raw, y_tr)
+            X_val = selector.transform(X_val_raw)
+
+            # Получаем выбранные фичи для этого фолда
+            selected_idx = selector.get_support(indices=True)
+            selected_features = [feature_names[i] for i in selected_idx]
+            all_selected_features.append(selected_features)
+
+            model = RandomForestClassifier(**params)
             model.fit(X_tr, y_tr)
             y_proba = model.predict_proba(X_val)[:, 1]
 
@@ -232,6 +259,16 @@ def objective(trial, X_train, y_train, all_columns):
         mean_accuracy = np.mean(accuracies)
         mean_roc_auc = np.mean(roc_auc)
 
+        # Выбираем наиболее частые фичи по всем фолдам
+        from collections import Counter
+
+        flat_features = [f for sublist in all_selected_features for f in sublist]
+        feature_counts = Counter(flat_features)
+        most_common_features = [feature for feature, count in feature_counts.most_common(k_best)]
+
+        trial.set_user_attr("selected_features", most_common_features)
+        trial.set_user_attr("n_selected_features", len(most_common_features))
+
         if METRIC == "f1":
             score = mean_f1
         elif METRIC == "accuracy":
@@ -243,12 +280,12 @@ def objective(trial, X_train, y_train, all_columns):
         elif METRIC == "roc_auc":
             score = mean_roc_auc
         elif METRIC == "custom":
-            tp = np.mean(tp_list)
-            tn = np.mean(tn_list)
-            fn = np.mean(fn_list)
-            fp = np.mean(fp_list)
-
-            score = custom_metric_from_counts(tp, tn, fn, fp)  # type: ignore
+            # Суммируем по всем фолдам, а не усредняем!
+            tp_total = np.sum(tp_list)
+            tn_total = np.sum(tn_list)
+            fn_total = np.sum(fn_list)
+            fp_total = np.sum(fp_list)
+            score = custom_metric_from_counts(tp_total, tn_total, fn_total, fp_total)
         else:
             logger.warning(f"Неизвестная метрика '{METRIC}', используется recall по умолчанию.")
             score = mean_recall
@@ -292,7 +329,12 @@ def run_optuna_experiment(
             return objective(trial, X_train, y_train, X_train.columns)
 
         study = optuna.create_study(study_name=experiment_name, direction="maximize")
-        manual_optuna_progress(study, n_trials, optuna_objective)
+        early_stopping = EarlyStoppingCallback(
+            patience=50, min_delta=0.001
+        )  # Это и строку ниже закоментить чтобы убрать раннюю остановку
+        study.optimize(optuna_objective, n_trials=n_trials, callbacks=[early_stopping])
+
+        # manual_optuna_progress(study, n_trials, optuna_objective) # включить если выключили раннюю остановка
 
         best_params = study.best_trial.params.copy()
 
@@ -699,8 +741,7 @@ def log_with_mlflow(
 
 
 def today():
-    now = pd.to_datetime(datetime.now())
-    return now
+    return datetime.now()
 
 
 if __name__ == "__main__":
@@ -724,10 +765,10 @@ if __name__ == "__main__":
     y_top = top_users[TARGET_COL]
 
     # Сетка параметров
-    fn_penalty_grid = range(2, 3)  # первое входит, второе нет
-    fp_penalty_grid = range(1, 2)
-    fn_stop_grid = range(3, 4)
-    max_fn_soft_grid = range(1, 2)
+    fn_penalty_grid = range(0, 3)  # первое входит, второе нет
+    fp_penalty_grid = range(0, 3)
+    fn_stop_grid = range(0, 3)
+    max_fn_soft_grid = range(0, 3)
 
     # FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
     # FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
@@ -741,8 +782,8 @@ if __name__ == "__main__":
         # Устанавливаем глобальные параметры
         FN_PENALTY_WEIGHT = fn_penalty
         FP_PENALTY_WEIGHT = fp_penalty
-        FN_WEIGHT = 0.7
-        FP_WEIGHT = 0.3
+        FN_WEIGHT = 0.8
+        FP_WEIGHT = 0.2
         MIN_PRECISION = 0.3
         FN_STOP = fn_stop_val
         MAX_FN_SOFT = max_fn_soft_val
