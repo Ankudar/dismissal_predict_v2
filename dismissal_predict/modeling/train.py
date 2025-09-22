@@ -160,21 +160,22 @@ def convert_all_to_float(df: pd.DataFrame, exclude_cols=None):
 
 def objective(trial, X_train, y_train, all_columns):
     try:
-        k_best = trial.suggest_int("k_best", 5, min(40, X_train.shape[1]))
+        k_best = trial.suggest_int("k_best", 10, min(40, X_train.shape[1]))
 
         feature_names = X_train.columns.tolist()
 
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 500, 3000, step=100),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 31, 256),
-            "max_depth": trial.suggest_int("max_depth", -1, 16),
-            "min_child_samples": trial.suggest_int("min_child_samples", 10, 50),
+            "n_estimators": trial.suggest_int("n_estimators", 300, 1000, step=100),
+            "learning_rate": trial.suggest_float("learning_rate", 0.05, 0.2, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 31, 128),
+            "max_depth": trial.suggest_int("max_depth", 4, 12),
+            "min_child_samples": trial.suggest_int("min_child_samples", 5, 20),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
             "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 2.0),
             "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 2.0),
             "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]),
+            "boosting_type": "gbdt",
         }
 
         skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
@@ -748,7 +749,7 @@ def log_with_mlflow(
 
             params_path = "best_params.json"
             with open(params_path, "w") as f:
-                json.dump(best_params, f, indent=4)
+                json.dump(model_params, f, indent=4)
 
             mlflow.log_artifact(params_path)
             os.remove(params_path)
@@ -820,10 +821,10 @@ if __name__ == "__main__":
     y_top = top_users[TARGET_COL]
 
     # Сетка параметров
-    fn_penalty_grid = range(1, 6)  # первое входит, второе нет
+    fn_penalty_grid = range(3, 6)  # первое входит, второе нет
     fp_penalty_grid = range(1, 4)
-    fn_stop_grid = range(1, 3)
-    max_fn_soft_grid = range(1, 3)
+    fn_stop_grid = range(0, 3)
+    max_fn_soft_grid = range(0, 3)
 
     # FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
     # FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
