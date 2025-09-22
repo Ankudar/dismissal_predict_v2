@@ -6,6 +6,7 @@ import os
 import warnings
 
 import joblib
+import lightgbm as lgb
 import matplotlib.pyplot as plt
 import mlflow
 import mlflow.sklearn
@@ -22,6 +23,7 @@ from sklearn.metrics import (
     accuracy_score,
     confusion_matrix,
     f1_score,
+    fbeta_score,
     precision_recall_fscore_support,
     precision_score,
     recall_score,
@@ -50,14 +52,15 @@ RANDOM_STATE = 40
 N_TRIALS = 5000  # итерации для оптуны
 N_TRIALS_FOR_TOP = 5000
 N_SPLITS = 5  # число кроссвалидаций
-METRIC = "custom"
+METRIC = "f2"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
 MLFLOW_EXPERIMENT_TOP = "top_users"
 EARLY_STOP = 100
+BETA_FOR_F2 = 4
 
 TARGET_COL = "уволен"
 
-N_JOBS = 1
+N_JOBS = -1
 THRESHOLDS = np.arange(0.1, 0.9, 0.01)
 
 warnings.filterwarnings("ignore")
@@ -85,13 +88,25 @@ class EarlyStoppingCallback:
             logger.info(f"Ранняя остановка: нет улучшений {self.patience} trials")
 
 
-def custom_metric_from_counts(tp, tn, fn, fp):
-    fn_penalty = np.exp(-FN_PENALTY_WEIGHT * fn)
-    fp_penalty = np.exp(-FP_PENALTY_WEIGHT * fp)
-    score = fn_penalty * FN_WEIGHT + fp_penalty * FP_WEIGHT
-    max_score = FN_WEIGHT + FP_WEIGHT
-    normalized_score = score / max_score
-    return round(normalized_score, 6)
+def custom_metric_from_counts(tp, tn, fn, fp, beta=BETA_FOR_F2, fn_tolerance=2):
+    # Если FN больше допустимого порога → метрика 0
+    if fn > fn_tolerance:
+        return 0.0
+
+    # Precision и Recall
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+
+    # Если и precision и recall = 0 → метрика 0
+    if precision + recall == 0:
+        return 0.0
+
+    # F-beta (по умолчанию F2)
+    f_beta = (
+        (1 + beta**BETA_FOR_F2) * (precision * recall) / (beta**BETA_FOR_F2 * precision + recall)
+    )
+
+    return round(f_beta, 6)
 
 
 def get_confusion_counts(cm):
@@ -147,44 +162,47 @@ def objective(trial, X_train, y_train, all_columns):
     try:
         k_best = trial.suggest_int("k_best", 5, min(40, X_train.shape[1]))
 
-        # Сохраняем имена фич до преобразования
         feature_names = X_train.columns.tolist()
 
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 200, 2000, step=50),
-            "max_depth": trial.suggest_int("max_depth", 3, 50),
-            "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 2, 10),
-            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
-            "criterion": trial.suggest_categorical("criterion", ["gini", "entropy"]),
-            "class_weight": trial.suggest_categorical(
-                "class_weight", ["balanced", "balanced_subsample", None]
-            ),
-            "bootstrap": trial.suggest_categorical("bootstrap", [True, False]),
+            "n_estimators": trial.suggest_int("n_estimators", 500, 3000, step=100),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 31, 256),
+            "max_depth": trial.suggest_int("max_depth", -1, 16),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 50),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 2.0),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 2.0),
+            "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]),
         }
 
         skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
-        recalls, precisions, f1s, accuracies, roc_auc = [], [], [], [], []
+        recalls, precisions, f1s, accuracies, roc_auc, f2s = [], [], [], [], [], []
         fn_list, fp_list, tn_list, tp_list = [], [], [], []
         fold_thresholds = []
-        all_selected_features = []  # Для сбора фич со всех фолдов
+        all_selected_features = []
 
         for train_idx, valid_idx in skf.split(X_train, y_train):
-            # Разделяем данные ДО feature selection
             X_tr_raw, X_val_raw = X_train.iloc[train_idx], X_train.iloc[valid_idx]
             y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[valid_idx]
 
-            # Feature selection на ТРЕНИРОВОЧНОМ фолде (без утечки!)
             selector = SelectKBest(score_func=f_classif, k=k_best)
             X_tr = selector.fit_transform(X_tr_raw, y_tr)
             X_val = selector.transform(X_val_raw)
 
-            # Получаем выбранные фичи для этого фолда
             selected_idx = selector.get_support(indices=True)
             selected_features = [feature_names[i] for i in selected_idx]
             all_selected_features.append(selected_features)
 
-            model = RandomForestClassifier(**params)
+            model = lgb.LGBMClassifier(
+                **{k: v for k, v in params.items() if k != "class_weight"},
+                class_weight=params.get("class_weight"),
+                random_state=RANDOM_STATE,
+                n_jobs=N_JOBS,
+                verbose=-1,
+            )
+
             model.fit(X_tr, y_tr)
             y_proba = model.predict_proba(X_val)[:, 1]
 
@@ -218,6 +236,8 @@ def objective(trial, X_train, y_train, all_columns):
                     score_t = roc_auc_score(y_val, y_proba)
                 elif METRIC == "custom":
                     score_t = custom_metric_from_counts(tp, tn, fn, fp)
+                elif METRIC == "f2":
+                    score_t = fbeta_score(y_val, y_pred_t, beta=BETA_FOR_F2, zero_division=0)
                 else:
                     logger.warning(
                         f"Неизвестная метрика '{METRIC}', используем recall по умолчанию"
@@ -243,6 +263,7 @@ def objective(trial, X_train, y_train, all_columns):
             recalls.append(recall_score(y_val, y_pred))
             precisions.append(precision_score(y_val, y_pred, zero_division=0))
             f1s.append(f1_score(y_val, y_pred, zero_division=0))
+            f2s.append(fbeta_score(y_val, y_pred, beta=BETA_FOR_F2, zero_division=0))
             accuracies.append(accuracy_score(y_val, y_pred))
             roc_auc.append(roc_auc_score(y_val, y_proba))
 
@@ -259,8 +280,8 @@ def objective(trial, X_train, y_train, all_columns):
         mean_f1 = np.mean(f1s)
         mean_accuracy = np.mean(accuracies)
         mean_roc_auc = np.mean(roc_auc)
+        mean_f2 = np.mean(f2s)
 
-        # Выбираем наиболее частые фичи по всем фолдам
         from collections import Counter
 
         flat_features = [f for sublist in all_selected_features for f in sublist]
@@ -281,12 +302,13 @@ def objective(trial, X_train, y_train, all_columns):
         elif METRIC == "roc_auc":
             score = mean_roc_auc
         elif METRIC == "custom":
-            # Суммируем по всем фолдам, а не усредняем!
             tp_total = np.sum(tp_list)
             tn_total = np.sum(tn_list)
             fn_total = np.sum(fn_list)
             fp_total = np.sum(fp_list)
             score = custom_metric_from_counts(tp_total, tn_total, fn_total, fp_total)
+        elif METRIC == "f2":
+            score = mean_f2
         else:
             logger.warning(f"Неизвестная метрика '{METRIC}', используется recall по умолчанию.")
             score = mean_recall
@@ -330,12 +352,8 @@ def run_optuna_experiment(
             return objective(trial, X_train, y_train, X_train.columns)
 
         study = optuna.create_study(study_name=experiment_name, direction="maximize")
-        early_stopping = EarlyStoppingCallback(
-            patience=50, min_delta=0.001
-        )  # Это и строку ниже закоментить чтобы убрать раннюю остановку
+        early_stopping = EarlyStoppingCallback(patience=EARLY_STOP, min_delta=0.001)
         study.optimize(optuna_objective, n_trials=n_trials, callbacks=[early_stopping])
-
-        # manual_optuna_progress(study, n_trials, optuna_objective) # включить если выключили раннюю остановка
 
         best_params = study.best_trial.params.copy()
 
@@ -348,11 +366,22 @@ def run_optuna_experiment(
 
         best_threshold = study.best_trial.user_attrs["best_threshold"]
 
-        final_model = RandomForestClassifier(
-            **best_params,
-            random_state=RANDOM_STATE,
-            n_jobs=N_JOBS,
-        )
+        model_params = {
+            "n_estimators": best_params.get("n_estimators", 100),
+            "learning_rate": best_params.get("learning_rate", 0.1),
+            "num_leaves": best_params.get("num_leaves", 31),
+            "max_depth": best_params.get("max_depth", -1),
+            "min_child_samples": best_params.get("min_child_samples", 20),
+            "subsample": best_params.get("subsample", 1.0),
+            "colsample_bytree": best_params.get("colsample_bytree", 1.0),
+            "reg_alpha": best_params.get("reg_alpha", 0.0),
+            "reg_lambda": best_params.get("reg_lambda", 0.0),
+            "class_weight": best_params.get("class_weight", None),
+            "random_state": RANDOM_STATE,
+            "n_jobs": N_JOBS,
+        }
+
+        final_model = lgb.LGBMClassifier(**model_params)
 
         final_model.fit(X_train, y_train)
 
@@ -369,6 +398,7 @@ def run_optuna_experiment(
             "recall": recall,
             "roc_auc": roc_auc_score(y_test, y_pred_proba),
             "f1": f1_score(y_test, y_pred),
+            "f2": fbeta_score(y_test, y_pred, beta=BETA_FOR_F2),
             "custom": custom_metric_from_counts(tp, tn, fn, fp),
         }
 
@@ -430,13 +460,14 @@ def run_optuna_experiment(
             "recall": recall_train,
             "roc_auc": roc_auc_score(y_train, y_pred_proba_train),
             "f1": f1_score(y_train, y_pred_train),
+            "f2": fbeta_score(y_train, y_pred_train, beta=BETA_FOR_F2, zero_division=0),
             "custom": custom_metric_from_counts(tp, tn, fn, fp),
         }
 
         log_with_mlflow(
             final_model=final_model,
             metric=metric,
-            best_params=best_params,
+            model_params=model_params,
             best_threshold=best_threshold,
             study=study,
             X_test=X_test,
@@ -460,7 +491,7 @@ def run_optuna_experiment(
 def log_with_mlflow(
     final_model,
     metric,
-    best_params,
+    model_params,
     best_threshold,
     study,
     X_test,
@@ -484,12 +515,12 @@ def log_with_mlflow(
             mlflow.end_run()
 
         with mlflow.start_run(run_name=run_name):
-            mlflow.log_params(best_params)
+            mlflow.log_params(model_params)
             mlflow.log_param("test_size", TEST_SIZE)
             mlflow.log_param("random_state", RANDOM_STATE)
             mlflow.log_param("n_trials", n_trials)
             mlflow.log_param("n_splits", N_SPLITS)
-            mlflow.log_param("model_type", "RandomForestClassifier")
+            mlflow.log_param("model_type", "LGBMClassifier")
             mlflow.log_param("threshold", round(best_threshold, 4))
             mlflow.log_param(
                 "cv_best_threshold", round(study.best_trial.user_attrs["best_threshold"], 4)
@@ -501,6 +532,9 @@ def log_with_mlflow(
 
             mlflow.log_metric("f1_train", round(final_metrics_train["f1"], 3))
             mlflow.log_metric("f1_test", round(final_metrics["f1"], 3))
+
+            mlflow.log_metric("f2_train", round(final_metrics_train["f2"], 3))
+            mlflow.log_metric("f2_test", round(final_metrics["f2"], 3))
 
             mlflow.log_metric("accuracy_train", round(final_metrics_train["accuracy"], 3))
             mlflow.log_metric("accuracy_test", round(final_metrics["accuracy"], 3))
@@ -539,17 +573,35 @@ def log_with_mlflow(
             mlflow.log_artifact("roc_curve.png")
             os.remove("roc_curve.png")
 
-            # SHAP
-            if hasattr(final_model, "feature_names_in_"):
-                X_test = X_test[final_model.feature_names_in_]
+            # SHAP с fallback
+            try:
+                if hasattr(final_model, "feature_names_in_"):
+                    model_feats = list(final_model.feature_names_in_)
+                    X_test = X_test.reindex(columns=model_feats, fill_value=0)
 
-            explainer = shap.Explainer(final_model, X_test)
-            shap_values = explainer(X_test, check_additivity=False)
+                # Для LightGBM используем booster_
+                booster = getattr(final_model, "booster_", final_model)
+                explainer = shap.TreeExplainer(booster)
+                shap_values = explainer(X_test)
 
-            # Берем SHAP только для класса 1
-            shap_class_1 = shap_values.values[:, :, 1]
+            except (json.JSONDecodeError, Exception) as e:
+                print(f"Ошибка TreeExplainer: {e}. Переключаемся на универсальный Explainer.")
+                explainer = shap.Explainer(final_model.predict, X_test)
+                shap_values = explainer(X_test)
 
-            # Строим dot plot
+            # Унификация формата shap_values
+            if hasattr(shap_values, "values"):  # старый API
+                shap_array = shap_values.values
+            else:  # новый API
+                shap_array = shap_values
+
+            # Для бинарной классификации — берём класс 1
+            if shap_array.ndim == 3 and shap_array.shape[2] == 2:
+                shap_class_1 = shap_array[:, :, 1]
+            else:
+                shap_class_1 = shap_array
+
+            # Рисуем dot plot
             plt.figure()
             shap.summary_plot(shap_class_1, X_test, plot_type="dot", show=False, max_display=39)
             plt.tight_layout()
@@ -656,26 +708,28 @@ def log_with_mlflow(
             os.remove(selected_features_path)
 
             # Correlation heatmap
-            corr_matrix = X_test[selected_features].corr(method="pearson")
-            plt.figure(figsize=(12, 10))
-            sns.heatmap(
-                corr_matrix,
-                annot=True,
-                fmt=".2f",
-                cmap="coolwarm",
-                center=0,
-                square=True,
-                cbar_kws={"shrink": 0.75},
-                linewidths=0.5,
-                linecolor="gray",
-                annot_kws={"size": 6},  # <-- Уменьшенный шрифт аннотаций
-            )
-            plt.title("Correlation Heatmap (Test Data)")
-            plt.tight_layout()
-            plt.savefig("correlation_heatmap.png")
-            plt.close()
-            mlflow.log_artifact("correlation_heatmap.png")
-            os.remove("correlation_heatmap.png")
+            safe_features = [f for f in selected_features if f in X_test.columns]
+            if safe_features:
+                corr_matrix = X_test[safe_features].corr(method="pearson")
+                plt.figure(figsize=(12, 10))
+                sns.heatmap(
+                    corr_matrix,
+                    annot=True,
+                    fmt=".2f",
+                    cmap="coolwarm",
+                    center=0,
+                    square=True,
+                    cbar_kws={"shrink": 0.75},
+                    linewidths=0.5,
+                    linecolor="gray",
+                    annot_kws={"size": 6},
+                )
+                plt.title("Correlation Heatmap (Test Data)")
+                plt.tight_layout()
+                plt.savefig("correlation_heatmap.png")
+                plt.close()
+                mlflow.log_artifact("correlation_heatmap.png")
+                os.remove("correlation_heatmap.png")
 
             # Log high correlation feature pairs (|corr| > 0.9)
             high_corr_output = "high_corr_pairs.txt"
@@ -766,10 +820,10 @@ if __name__ == "__main__":
     y_top = top_users[TARGET_COL]
 
     # Сетка параметров
-    fn_penalty_grid = range(4, 6)  # первое входит, второе нет
-    fp_penalty_grid = range(2, 4)
-    fn_stop_grid = range(0, 2)
-    max_fn_soft_grid = range(0, 2)
+    fn_penalty_grid = range(1, 6)  # первое входит, второе нет
+    fp_penalty_grid = range(1, 4)
+    fn_stop_grid = range(1, 3)
+    max_fn_soft_grid = range(1, 3)
 
     # FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
     # FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.

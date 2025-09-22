@@ -97,21 +97,26 @@ def add_predictions_to_excel(original_df, model, threshold, result_file, preproc
         )
 
         # 🔹 SHAP: рассчитываем и сохраняем
-        explainer = shap.Explainer(model)
-        shap_values = explainer(predict_clean)
+        try:
+            # Для LGBM быстрее и правильнее TreeExplainer
+            explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(predict_clean)
+
+            # shap_values может быть list при бинарной классификации
+            if isinstance(shap_values, list) and len(shap_values) == 2:
+                shap_vals_for_class1 = shap_values[1]  # класс 1
+            else:
+                shap_vals_for_class1 = shap_values
+
+        except Exception as e:
+            logger.warning(f"TreeExplainer не сработал ({e}), пробую универсальный Explainer.")
+            explainer = shap.Explainer(model.predict_proba, predict_clean)
+            shap_values = explainer(predict_clean)
+            shap_vals_for_class1 = shap_values.values[:, :, 1]
 
         # Проверка на пустой список признаков
         if not features:
             features = list(predict_clean.columns)
-
-        # Обработка SHAP значений для модели с вероятностями
-        if shap_values.values.ndim == 3:
-            # Если 3D — берём SHAP для класса 1
-            shap_vals_for_class1 = shap_values.values[:, :, 1]
-        elif shap_values.values.ndim == 2:
-            shap_vals_for_class1 = shap_values.values
-        else:
-            raise ValueError(f"Неожиданный формат SHAP-значений: ndim={shap_values.values.ndim}")
 
         shap_df = pd.DataFrame(shap_vals_for_class1, columns=features)
         shap_df.insert(0, "фио", predict_df["фио"].values)

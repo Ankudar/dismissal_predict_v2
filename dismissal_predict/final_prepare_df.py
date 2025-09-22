@@ -109,6 +109,7 @@ class DataPreprocessor:
         self.scaler = None
         self.numeric_cols = []
         self.preprocessor = None
+        self.feature_names_ = None  # сохраняем список фич после fit
 
     def save(self, path: str):
         joblib.dump(self, path)
@@ -124,16 +125,6 @@ class DataPreprocessor:
             df = df.drop(columns=high_nan_cols)
         return df
 
-    # def drop_trash_rows(self, df, threshold=0.5):
-    #     row_nan_fraction = df.isnull().mean(axis=1)
-    #     bad_rows = df.index[row_nan_fraction > threshold]
-    #     if len(bad_rows) > 0:
-    #         print(
-    #             f"Удалены строки с более чем {int(threshold * 100)}% пропусков: {len(bad_rows)} шт."
-    #         )
-    #         df = df.drop(index=bad_rows)
-    #     return df
-
     def _handle_nans(self, df):
         for col in self.numeric_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -142,27 +133,23 @@ class DataPreprocessor:
 
     def fit(self, df: pd.DataFrame):
         df = df.copy()
-
         df.drop(columns=[col for col in DROP_COLS if col in df.columns], inplace=True)
 
         uvolen_series = df["уволен"] if "уволен" in df.columns else None
-
         df = self.drop_trash_feature(df)
 
         if uvolen_series is not None:
             uvolen_series = uvolen_series.loc[df.index]
-
         if "уволен" in df.columns:
             df = df.drop(columns=["уволен"])
 
-        # Попробуем привести потенциальные числа к числовому типу
+        # Пробуем привести к числу
         for col in df.columns:
             try:
                 df[col] = pd.to_numeric(df[col])
             except Exception:
                 pass
 
-        # Обновим числовые и категориальные признаки после приведения типов
         self.numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
         self.cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
 
@@ -195,9 +182,9 @@ class DataPreprocessor:
         )
 
         df_transformed = self.preprocessor.fit_transform(df)
-        df_transformed = pd.DataFrame(
-            df_transformed, columns=self.preprocessor.get_feature_names_out()  # type: ignore
-        )
+        self.feature_names_ = self.preprocessor.get_feature_names_out()  # сохраняем список фич
+
+        df_transformed = pd.DataFrame(df_transformed, columns=self.feature_names_, index=df.index)
 
         if uvolen_series is not None:
             df_transformed["уволен"] = uvolen_series.values
@@ -206,28 +193,27 @@ class DataPreprocessor:
 
     def transform(self, df: pd.DataFrame):
         df = df.copy()
-
-        # Удаляем мусорные столбцы
         df.drop(columns=[col for col in DROP_COLS if col in df.columns], inplace=True)
 
-        # Сохраняем целевую переменную
         uvolen_series = df["уволен"] if "уволен" in df.columns else None
         if uvolen_series is not None:
             uvolen_series = uvolen_series.loc[df.index]
-
-        # Удаляем "уволен" перед препроцессингом
         if "уволен" in df.columns:
             df = df.drop(columns=["уволен"])
 
         df = self._handle_nans(df)
 
-        # Применяем препроцессор
         df_transformed = self.preprocessor.transform(df)  # type: ignore
-        df_transformed = pd.DataFrame(
-            df_transformed, columns=self.preprocessor.get_feature_names_out()  # type: ignore
-        )
+        df_transformed = pd.DataFrame(df_transformed, columns=self.feature_names_, index=df.index)
 
-        # Возвращаем "уволен"
+        # если вдруг чего-то нет → добиваем нулями
+        missing_cols = set(self.feature_names_) - set(df_transformed.columns)
+        for col in missing_cols:
+            df_transformed[col] = 0
+
+        # выравниваем порядок
+        df_transformed = df_transformed[self.feature_names_]
+
         if uvolen_series is not None:
             df_transformed["уволен"] = uvolen_series.values
 
