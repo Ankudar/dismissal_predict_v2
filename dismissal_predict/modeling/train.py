@@ -1,4 +1,5 @@
 from datetime import datetime
+from functools import partial
 from itertools import product
 import json
 import logging
@@ -47,21 +48,21 @@ os.makedirs(MODELS, exist_ok=True)
 INPUT_FILE_MAIN_USERS = f"{DATA_PROCESSED}/main_users_for_train.csv"
 INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
-TEST_SIZE = 0.25
+TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 5000  # итерации для оптуны
-N_TRIALS_FOR_TOP = 5000
-N_SPLITS = 5  # число кроссвалидаций
+N_TRIALS = 1000  # итерации для оптуны
+N_TRIALS_FOR_TOP = 1000
+N_SPLITS = 3  # число кроссвалидаций
 METRIC = "f2"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
 MLFLOW_EXPERIMENT_TOP = "top_users"
-EARLY_STOP = 100
-BETA_FOR_F2 = 4
+EARLY_STOP = 50
+BETA_FOR_F2 = 10
 
 TARGET_COL = "уволен"
 
 N_JOBS = -1
-THRESHOLDS = np.arange(0.1, 0.9, 0.01)
+THRESHOLDS = np.arange(0.1, 0.9, 0.02)
 
 warnings.filterwarnings("ignore")
 
@@ -158,20 +159,19 @@ def convert_all_to_float(df: pd.DataFrame, exclude_cols=None):
     return df
 
 
-def objective(trial, X_train, y_train, all_columns):
+def hybrid_objective(trial, X_train, y_train):
     try:
-        k_best = trial.suggest_int("k_best", 10, min(40, X_train.shape[1]))
-
+        k_best = trial.suggest_int("k_best", 5, min(40, X_train.shape[1]))
         feature_names = X_train.columns.tolist()
 
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 300, 1000, step=100),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 800, step=100),
             "learning_rate": trial.suggest_float("learning_rate", 0.05, 0.2, log=True),
             "num_leaves": trial.suggest_int("num_leaves", 31, 128),
             "max_depth": trial.suggest_int("max_depth", 4, 12),
-            "min_child_samples": trial.suggest_int("min_child_samples", 5, 20),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "min_child_samples": trial.suggest_int("min_child_samples", 5, 30),
+            "subsample": trial.suggest_float("subsample", 0.7, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 1.0),
             "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 2.0),
             "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 2.0),
             "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]),
@@ -179,10 +179,7 @@ def objective(trial, X_train, y_train, all_columns):
         }
 
         skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
-        recalls, precisions, f1s, accuracies, roc_auc, f2s = [], [], [], [], [], []
-        fn_list, fp_list, tn_list, tp_list = [], [], [], []
-        fold_thresholds = []
-        all_selected_features = []
+        all_selected_features, scores = [], []
 
         for train_idx, valid_idx in skf.split(X_train, y_train):
             X_tr_raw, X_val_raw = X_train.iloc[train_idx], X_train.iloc[valid_idx]
@@ -203,133 +200,52 @@ def objective(trial, X_train, y_train, all_columns):
                 n_jobs=N_JOBS,
                 verbose=-1,
             )
-
             model.fit(X_tr, y_tr)
-            y_proba = model.predict_proba(X_val)[:, 1]
 
-            best_fp = float("inf")
-            best_fn = float("inf")
-            best_score = -np.inf
-            best_threshold = 0.5
-
-            for t in THRESHOLDS:
-                y_pred_t = (y_proba >= t).astype(int)
-                cm_t = confusion_matrix(y_val, y_pred_t, labels=[0, 1])
-                tn, fp, fn, tp = get_confusion_counts(cm_t)
-
-                if fn > FN_STOP:
-                    continue
-
-                precision_t = precision_score(y_val, y_pred_t, zero_division=0)
-                if precision_t < MIN_PRECISION:
-                    continue
-
-                score_t = None
-                if METRIC == "f1":
-                    score_t = f1_score(y_val, y_pred_t, zero_division=0)
-                elif METRIC == "accuracy":
-                    score_t = accuracy_score(y_val, y_pred_t)
-                elif METRIC == "recall":
-                    score_t = recall_score(y_val, y_pred_t)
-                elif METRIC == "precision":
-                    score_t = precision_score(y_val, y_pred_t, zero_division=0)
-                elif METRIC == "roc_auc":
-                    score_t = roc_auc_score(y_val, y_proba)
-                elif METRIC == "custom":
-                    score_t = custom_metric_from_counts(tp, tn, fn, fp)
-                elif METRIC == "f2":
-                    score_t = fbeta_score(y_val, y_pred_t, beta=BETA_FOR_F2, zero_division=0)
-                else:
-                    logger.warning(
-                        f"Неизвестная метрика '{METRIC}', используем recall по умолчанию"
-                    )
-                    score_t = recall_score(y_val, y_pred_t)
-
-                if score_t is None:
-                    continue
-
-                if fn <= best_fn + MAX_FN_SOFT and (
-                    fn < best_fn
-                    or (fn == best_fn and fp < best_fp)
-                    or (fn == best_fn and fp == best_fp and score_t > best_score)
-                ):
-                    best_fp = fp
-                    best_fn = fn
-                    best_score = score_t
-                    best_threshold = t
-
-            fold_thresholds.append(best_threshold)
-            y_pred = (y_proba >= best_threshold).astype(int)
-
-            recalls.append(recall_score(y_val, y_pred))
-            precisions.append(precision_score(y_val, y_pred, zero_division=0))
-            f1s.append(f1_score(y_val, y_pred, zero_division=0))
-            f2s.append(fbeta_score(y_val, y_pred, beta=BETA_FOR_F2, zero_division=0))
-            accuracies.append(accuracy_score(y_val, y_pred))
-            roc_auc.append(roc_auc_score(y_val, y_proba))
-
+            y_pred = model.predict(X_val)
             cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
             tn, fp, fn, tp = get_confusion_counts(cm)
 
-            fn_list.append(fn)
-            fp_list.append(fp)
-            tn_list.append(tn)
-            tp_list.append(tp)
+            # контроль FN и precision
+            if fn > FN_STOP:
+                score = 0
+            elif precision_score(y_val, y_pred, zero_division=0) < MIN_PRECISION:
+                score = 0
+            else:
+                if METRIC == "f1":
+                    score = f1_score(y_val, y_pred, zero_division=0)
+                elif METRIC == "accuracy":
+                    score = accuracy_score(y_val, y_pred)
+                elif METRIC == "recall":
+                    score = recall_score(y_val, y_pred)
+                elif METRIC == "precision":
+                    score = precision_score(y_val, y_pred, zero_division=0)
+                elif METRIC == "roc_auc":
+                    y_proba = model.predict_proba(X_val)[:, 1]
+                    score = roc_auc_score(y_val, y_proba)
+                elif METRIC == "custom":
+                    score = custom_metric_from_counts(tp, tn, fn, fp)
+                else:
+                    score = recall_score(y_val, y_pred)
 
-        mean_recall = np.mean(recalls)
-        mean_precision = np.mean(precisions)
-        mean_f1 = np.mean(f1s)
-        mean_accuracy = np.mean(accuracies)
-        mean_roc_auc = np.mean(roc_auc)
-        mean_f2 = np.mean(f2s)
+            scores.append(score)
 
+        mean_score = np.mean(scores)
+
+        # сохраняем признаки
         from collections import Counter
 
         flat_features = [f for sublist in all_selected_features for f in sublist]
         feature_counts = Counter(flat_features)
-        most_common_features = [feature for feature, count in feature_counts.most_common(k_best)]
+        most_common_features = [feature for feature, _ in feature_counts.most_common(k_best)]
 
         trial.set_user_attr("selected_features", most_common_features)
         trial.set_user_attr("n_selected_features", len(most_common_features))
 
-        if METRIC == "f1":
-            score = mean_f1
-        elif METRIC == "accuracy":
-            score = mean_accuracy
-        elif METRIC == "recall":
-            score = mean_recall
-        elif METRIC == "precision":
-            score = mean_precision
-        elif METRIC == "roc_auc":
-            score = mean_roc_auc
-        elif METRIC == "custom":
-            tp_total = np.sum(tp_list)
-            tn_total = np.sum(tn_list)
-            fn_total = np.sum(fn_list)
-            fp_total = np.sum(fp_list)
-            score = custom_metric_from_counts(tp_total, tn_total, fn_total, fp_total)
-        elif METRIC == "f2":
-            score = mean_f2
-        else:
-            logger.warning(f"Неизвестная метрика '{METRIC}', используется recall по умолчанию.")
-            score = mean_recall
-
-        logger.info(
-            f"\nTrial {trial.number} → k_best: {k_best}\n"
-            f"Recall: {mean_recall:.3f}, Precision: {mean_precision:.3f}, F1: {mean_f1:.3f},\n"
-            f"Accuracy: {mean_accuracy:.3f}, Score: {score:.3f}\n"
-            f"FN: {np.mean(fn_list):.1f}, FP: {np.mean(fp_list):.1f}, TN: {np.mean(tn_list):.1f}, TP: {np.mean(tp_list):.1f}\n"
-        )
-
-        final_threshold = np.mean(fold_thresholds)
-        trial.set_user_attr("best_threshold", final_threshold)
-
-        if np.isnan(score) or np.isinf(score):
-            return -1
-        return score
+        return mean_score if np.isfinite(mean_score) else -1
 
     except Exception as e:
-        logger.exception(f"Ошибка в objective: {e}")
+        logger.exception(f"Ошибка в hybrid_objective: {e}")
         return -1
 
 
@@ -349,65 +265,77 @@ def run_optuna_experiment(
         logger.info(f"Experiment: {experiment_name}")
         mlflow.set_experiment(experiment_name)
 
-        def optuna_objective(trial):
-            return objective(trial, X_train, y_train, X_train.columns)
+        # partial чтобы передать данные в objective
+        objective = partial(, X_train=X_train, y_train=y_train)
 
         study = optuna.create_study(study_name=experiment_name, direction="maximize")
         early_stopping = EarlyStoppingCallback(patience=EARLY_STOP, min_delta=0.001)
-        study.optimize(optuna_objective, n_trials=n_trials, callbacks=[early_stopping])
+        study.optimize(objective, n_trials=n_trials, callbacks=[early_stopping])
+
+        # теперь user_attrs точно будет
+        selected_features = study.best_trial.user_attrs["selected_features"]
+        X_train_sel, X_test_sel = X_train[selected_features], X_test[selected_features]
 
         best_params = study.best_trial.params.copy()
-
-        selected_features = study.best_trial.user_attrs["selected_features"]
-        n_selected_features = study.best_trial.user_attrs["n_selected_features"]
         best_params.pop("k_best", None)
+        model_params = {**best_params, "random_state": RANDOM_STATE, "n_jobs": N_JOBS}
 
-        X_train = X_train[selected_features]
-        X_test = X_test[selected_features]
-
-        best_threshold = study.best_trial.user_attrs["best_threshold"]
-
-        model_params = {
-            "n_estimators": best_params.get("n_estimators", 100),
-            "learning_rate": best_params.get("learning_rate", 0.1),
-            "num_leaves": best_params.get("num_leaves", 31),
-            "max_depth": best_params.get("max_depth", -1),
-            "min_child_samples": best_params.get("min_child_samples", 20),
-            "subsample": best_params.get("subsample", 1.0),
-            "colsample_bytree": best_params.get("colsample_bytree", 1.0),
-            "reg_alpha": best_params.get("reg_alpha", 0.0),
-            "reg_lambda": best_params.get("reg_lambda", 0.0),
-            "class_weight": best_params.get("class_weight", None),
-            "random_state": RANDOM_STATE,
-            "n_jobs": N_JOBS,
-        }
-
+        # final model
         final_model = lgb.LGBMClassifier(**model_params)
+        final_model.fit(X_train_sel, y_train)
 
-        final_model.fit(X_train, y_train)
+        # --- подбор порога только на лучшей модели ---
+        y_proba_train = final_model.predict_proba(X_train_sel)[:, 1]
+        best_threshold, best_fn, best_fp = 0.5, float("inf"), float("inf")
 
-        y_pred_proba = final_model.predict_proba(X_test)[:, 1]
+        for t in np.linspace(0, 1, 1000):
+            y_pred_t = (y_proba_train >= t).astype(int)
+            cm = confusion_matrix(y_train, y_pred_t, labels=[0, 1])
+            tn, fp, fn, tp = get_confusion_counts(cm)
+
+            # приоритет — FN минимален, затем FP
+            if fn < best_fn or (fn == best_fn and fp < best_fp):
+                best_fn, best_fp, best_threshold = fn, fp, t
+
+        # --- тестовые метрики ---
+        y_pred_proba = final_model.predict_proba(X_test_sel)[:, 1]
         y_pred = (y_pred_proba >= best_threshold).astype(int)
-        recall = recall_score(y_test, y_pred)
-        precision = precision_score(y_test, y_pred)
-        cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
-        tn, fp, fn, tp = get_confusion_counts(cm)
-
+        cm_test = confusion_matrix(y_test, y_pred, labels=[0, 1])
+        tn, fp, fn, tp = get_confusion_counts(cm_test)
         final_metrics = {
             "accuracy": accuracy_score(y_test, y_pred),
-            "precision": precision,
-            "recall": recall,
+            "precision": precision_score(y_test, y_pred, zero_division=0),
+            "recall": recall_score(y_test, y_pred),
             "roc_auc": roc_auc_score(y_test, y_pred_proba),
             "f1": f1_score(y_test, y_pred),
             "f2": fbeta_score(y_test, y_pred, beta=BETA_FOR_F2),
             "custom": custom_metric_from_counts(tp, tn, fn, fp),
         }
 
-        save_model = True
+        # --- train-метрики ---
+        y_pred_train = (y_proba_train >= best_threshold).astype(int)
+        cm_train = confusion_matrix(y_train, y_pred_train, labels=[0, 1])
+        tn, fp, fn, tp = get_confusion_counts(cm_train)
+        final_metrics_train = {
+            "accuracy": accuracy_score(y_train, y_pred_train),
+            "precision": precision_score(y_train, y_pred_train, zero_division=0),
+            "recall": recall_score(y_train, y_pred_train),
+            "roc_auc": roc_auc_score(y_train, y_proba_train),
+            "f1": f1_score(y_train, y_pred_train),
+            "f2": fbeta_score(y_train, y_pred_train, beta=BETA_FOR_F2, zero_division=0),
+            "custom": custom_metric_from_counts(tp, tn, fn, fp),
+        }
+
+        input_example = pd.DataFrame(X_test_sel[:1], columns=X_test_sel.columns)
+        run_name = f"model_{current_time}"
+
+        # --- сравнение с локальной моделью ---
+        save_model, is_best = True, False
         if os.path.exists(model_output_path):
             try:
                 old_model_bundle = joblib.load(model_output_path)
                 old_metrics = old_model_bundle.get("metrics", {})
+
                 logger.info(
                     "Старая модель: "
                     + ", ".join(
@@ -424,15 +352,20 @@ def run_optuna_experiment(
                 )
 
                 save_model = is_new_model_better(final_metrics, old_metrics)
+                is_best = save_model
+
                 if save_model:
                     logger.info(f"{GREEN}Новая модель лучше — сохраняем.{RESET}")
                 else:
                     logger.info(f"{RED}Старая модель лучше — не сохраняем новую.{RESET}")
             except Exception as e:
                 logger.warning(f"Не удалось загрузить старую модель: {e}. Сохраняем новую.")
-                save_model = True
+                save_model, is_best = True, True
+        else:
+            is_best = True
 
         if save_model:
+            os.makedirs(os.path.dirname(model_output_path), exist_ok=True)
             joblib.dump(
                 {
                     "model": final_model,
@@ -444,48 +377,29 @@ def run_optuna_experiment(
             )
             logger.info(f"Модель сохранена в {model_output_path}")
 
-        input_example = pd.DataFrame(X_test[:1], columns=X_test.columns)
-        run_name = f"model_{current_time}"
-
-        y_pred_proba_train = final_model.predict_proba(X_train)[:, 1]
-        y_pred_train = (y_pred_proba_train >= best_threshold).astype(int)
-        recall_train = recall_score(y_train, y_pred_train)
-        precision_train = precision_score(y_train, y_pred_train)
-        cm_train = confusion_matrix(y_train, y_pred_train, labels=[0, 1])
-        tp = tn = fp = fn = 0
-        tn, fp, fn, tp = get_confusion_counts(cm_train)
-
-        final_metrics_train = {
-            "accuracy": accuracy_score(y_train, y_pred_train),
-            "precision": precision_train,
-            "recall": recall_train,
-            "roc_auc": roc_auc_score(y_train, y_pred_proba_train),
-            "f1": f1_score(y_train, y_pred_train),
-            "f2": fbeta_score(y_train, y_pred_train, beta=BETA_FOR_F2, zero_division=0),
-            "custom": custom_metric_from_counts(tp, tn, fn, fp),
-        }
-
+        # --- логирование в MLflow ---
         log_with_mlflow(
             final_model=final_model,
             metric=metric,
             model_params=model_params,
             best_threshold=best_threshold,
             study=study,
-            X_test=X_test,
+            X_test=X_test_sel,
             y_test=y_test,
             final_metrics=final_metrics,
             final_metrics_train=final_metrics_train,
             selected_features=selected_features,
             model_output_path=model_output_path,
-            run_name=f"model_{current_time}",
+            run_name=run_name,
             n_trials=n_trials,
             input_example=input_example,
             y_pred_proba=y_pred_proba,
             y_pred=y_pred,
+            is_best=is_best,
         )
 
     except Exception as e:
-        logger.info(f"Ошибка: {e}")
+        logger.exception(f"Ошибка в run_optuna_experiment: {e}")
         raise
 
 
@@ -506,6 +420,7 @@ def log_with_mlflow(
     input_example,
     y_pred_proba,
     y_pred,
+    is_best: bool = False,
 ):
     try:
         n_selected_features = len(selected_features)
@@ -516,6 +431,7 @@ def log_with_mlflow(
             mlflow.end_run()
 
         with mlflow.start_run(run_name=run_name):
+            # Логируем параметры и метрики
             mlflow.log_params(model_params)
             mlflow.log_param("test_size", TEST_SIZE)
             mlflow.log_param("random_state", RANDOM_STATE)
@@ -523,36 +439,29 @@ def log_with_mlflow(
             mlflow.log_param("n_splits", N_SPLITS)
             mlflow.log_param("model_type", "LGBMClassifier")
             mlflow.log_param("threshold", round(best_threshold, 4))
-            mlflow.log_param(
-                "cv_best_threshold", round(study.best_trial.user_attrs["best_threshold"], 4)
-            )
-
+            mlflow.log_param("is_best", is_best)
             mlflow.log_param("opt_metric", f"{metric}")
+            mlflow.log_param("n_selected_features", n_selected_features)
+
             mlflow.log_metric("fn_test", fn)
             mlflow.log_metric("fp_test", fp)
-
             mlflow.log_metric("f1_train", round(final_metrics_train["f1"], 3))
             mlflow.log_metric("f1_test", round(final_metrics["f1"], 3))
-
             mlflow.log_metric("f2_train", round(final_metrics_train["f2"], 3))
             mlflow.log_metric("f2_test", round(final_metrics["f2"], 3))
-
             mlflow.log_metric("accuracy_train", round(final_metrics_train["accuracy"], 3))
             mlflow.log_metric("accuracy_test", round(final_metrics["accuracy"], 3))
-
             mlflow.log_metric("recall_train", round(final_metrics_train["recall"], 3))
             mlflow.log_metric("recall_test", round(final_metrics["recall"], 3))
-
             mlflow.log_metric("precision_train", round(final_metrics_train["precision"], 3))
             mlflow.log_metric("precision_test", round(final_metrics["precision"], 3))
-
             mlflow.log_metric("roc_auc_train", round(final_metrics_train["roc_auc"], 3))
             mlflow.log_metric("roc_auc_test", round(final_metrics["roc_auc"], 3))
-
             mlflow.log_metric("cv_custom_train", round(study.best_value, 4))
             mlflow.log_metric("custom_train", round(final_metrics_train["custom"], 4))
             mlflow.log_metric("custom_test", round(final_metrics["custom"], 4))
 
+            # Логируем модель как артефакт и через sklearn
             mlflow.log_artifact(model_output_path)
             mlflow.sklearn.log_model(final_model, name="final_model", input_example=input_example)  # type: ignore
 
@@ -732,20 +641,20 @@ def log_with_mlflow(
                 mlflow.log_artifact("correlation_heatmap.png")
                 os.remove("correlation_heatmap.png")
 
-            # Log high correlation feature pairs (|corr| > 0.9)
-            high_corr_output = "high_corr_pairs.txt"
-            corr_abs = corr_matrix.abs()
-            upper = corr_abs.where(np.triu(np.ones(corr_abs.shape), k=1).astype(bool))
+                # Log high correlation feature pairs (|corr| > 0.9)
+                high_corr_output = "high_corr_pairs.txt"
+                corr_abs = corr_matrix.abs()
+                upper = corr_abs.where(np.triu(np.ones(corr_abs.shape), k=1).astype(bool))
 
-            with open(high_corr_output, "w") as f:
-                for col in upper.columns:
-                    for row in upper.index:
-                        val = upper.loc[row, col]
-                        if pd.notnull(val) and val > 0.9:
-                            f.write(f"{row} - {col}: {val:.3f}\n")
+                with open(high_corr_output, "w") as f:
+                    for col in upper.columns:
+                        for row in upper.index:
+                            val = upper.loc[row, col]
+                            if pd.notnull(val) and val > 0.9:
+                                f.write(f"{row} - {col}: {val:.3f}\n")
 
-            mlflow.log_artifact(high_corr_output)
-            os.remove(high_corr_output)
+                mlflow.log_artifact(high_corr_output)
+                os.remove(high_corr_output)
 
             params_path = "best_params.json"
             with open(params_path, "w") as f:
@@ -821,10 +730,10 @@ if __name__ == "__main__":
     y_top = top_users[TARGET_COL]
 
     # Сетка параметров
-    fn_penalty_grid = range(3, 6)  # первое входит, второе нет
-    fp_penalty_grid = range(1, 4)
-    fn_stop_grid = range(0, 3)
-    max_fn_soft_grid = range(0, 3)
+    fn_penalty_grid = range(0, 6)  # первое входит, второе нет
+    fp_penalty_grid = range(0, 6)
+    fn_stop_grid = range(0, 6)
+    max_fn_soft_grid = range(0, 6)
 
     # FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
     # FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
@@ -840,7 +749,7 @@ if __name__ == "__main__":
         FP_PENALTY_WEIGHT = fp_penalty
         FN_WEIGHT = 0.7
         FP_WEIGHT = 0.3
-        MIN_PRECISION = 0.3
+        MIN_PRECISION = 0.4
         FN_STOP = fn_stop_val
         MAX_FN_SOFT = max_fn_soft_val
 
