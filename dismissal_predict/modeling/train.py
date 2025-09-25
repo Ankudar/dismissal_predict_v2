@@ -50,13 +50,13 @@ INPUT_FILE_TOP_USERS = f"{DATA_PROCESSED}/main_top_for_train.csv"
 
 TEST_SIZE = 0.2
 RANDOM_STATE = 40
-N_TRIALS = 1000  # итерации для оптуны
-N_TRIALS_FOR_TOP = 1000
+N_TRIALS = 5000  # итерации для оптуны
+N_TRIALS_FOR_TOP = 5000
 N_SPLITS = 3  # число кроссвалидаций
 METRIC = "f2"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
 MLFLOW_EXPERIMENT_TOP = "top_users"
-EARLY_STOP = 50
+EARLY_STOP = 100
 BETA_FOR_F2 = 10
 
 TARGET_COL = "уволен"
@@ -205,29 +205,44 @@ def hybrid_objective(trial, X_train, y_train):
             y_pred = model.predict(X_val)
             cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
             tn, fp, fn, tp = get_confusion_counts(cm)
+            precision_val = precision_score(y_val, y_pred, zero_division=0)
 
-            # контроль FN и precision
+            # --- штрафы---
             if fn > FN_STOP:
-                score = 0
-            elif precision_score(y_val, y_pred, zero_division=0) < MIN_PRECISION:
-                score = 0
+                penalty_fn = np.exp(-(fn - FN_STOP) * FN_PENALTY_WEIGHT)
             else:
-                if METRIC == "f1":
-                    score = f1_score(y_val, y_pred, zero_division=0)
-                elif METRIC == "accuracy":
-                    score = accuracy_score(y_val, y_pred)
-                elif METRIC == "recall":
-                    score = recall_score(y_val, y_pred)
-                elif METRIC == "precision":
-                    score = precision_score(y_val, y_pred, zero_division=0)
-                elif METRIC == "roc_auc":
-                    y_proba = model.predict_proba(X_val)[:, 1]
-                    score = roc_auc_score(y_val, y_proba)
-                elif METRIC == "custom":
-                    score = custom_metric_from_counts(tp, tn, fn, fp)
-                else:
-                    score = recall_score(y_val, y_pred)
+                penalty_fn = 1.0
 
+            if precision_val < MIN_PRECISION:
+                penalty_prec = np.exp(-(MIN_PRECISION - precision_val) * FP_PENALTY_WEIGHT * 10)
+            else:
+                penalty_prec = 1.0
+
+            # --- мягкое ограничение FN ---
+            if fn > MAX_FN_SOFT:
+                penalty_soft_fn = np.exp(-(fn - MAX_FN_SOFT) * FN_WEIGHT)
+            else:
+                penalty_soft_fn = 1.0
+
+            # --- базовая метрика ---
+            if METRIC == "f1":
+                base_score = f1_score(y_val, y_pred, zero_division=0)
+            elif METRIC == "accuracy":
+                base_score = accuracy_score(y_val, y_pred)
+            elif METRIC == "recall":
+                base_score = recall_score(y_val, y_pred)
+            elif METRIC == "precision":
+                base_score = precision_val
+            elif METRIC == "roc_auc":
+                y_proba = model.predict_proba(X_val)[:, 1]
+                base_score = roc_auc_score(y_val, y_proba)
+            elif METRIC == "custom":
+                base_score = custom_metric_from_counts(tp, tn, fn, fp)
+            else:
+                base_score = recall_score(y_val, y_pred)
+
+            # --- итоговый скор с учётом всех штрафов ---
+            score = base_score * penalty_fn * penalty_prec * penalty_soft_fn
             scores.append(score)
 
         mean_score = np.mean(scores)
@@ -266,7 +281,7 @@ def run_optuna_experiment(
         mlflow.set_experiment(experiment_name)
 
         # partial чтобы передать данные в objective
-        objective = partial(, X_train=X_train, y_train=y_train)
+        objective = partial(hybrid_objective, X_train=X_train, y_train=y_train)
 
         study = optuna.create_study(study_name=experiment_name, direction="maximize")
         early_stopping = EarlyStoppingCallback(patience=EARLY_STOP, min_delta=0.001)
@@ -730,10 +745,10 @@ if __name__ == "__main__":
     y_top = top_users[TARGET_COL]
 
     # Сетка параметров
-    fn_penalty_grid = range(0, 6)  # первое входит, второе нет
-    fp_penalty_grid = range(0, 6)
-    fn_stop_grid = range(0, 6)
-    max_fn_soft_grid = range(0, 6)
+    fn_penalty_grid = range(8, 10)  # первое входит, второе нет
+    fp_penalty_grid = range(0, 2)
+    fn_stop_grid = range(6, 10)
+    max_fn_soft_grid = range(6, 10)
 
     # FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
     # FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
