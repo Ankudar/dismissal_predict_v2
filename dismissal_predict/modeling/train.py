@@ -56,7 +56,7 @@ N_SPLITS = 3  # число кроссвалидаций
 METRIC = "f2"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
 MLFLOW_EXPERIMENT_TOP = "top_users"
-EARLY_STOP = 100
+EARLY_STOP = 50
 BETA_FOR_F2 = 10
 
 TARGET_COL = "уволен"
@@ -165,10 +165,10 @@ def hybrid_objective(trial, X_train, y_train):
         feature_names = X_train.columns.tolist()
 
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 200, 800, step=100),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 400, step=100),
             "learning_rate": trial.suggest_float("learning_rate", 0.05, 0.2, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 31, 128),
-            "max_depth": trial.suggest_int("max_depth", 4, 12),
+            "num_leaves": trial.suggest_int("num_leaves", 31, 64),
+            "max_depth": trial.suggest_int("max_depth", 4, 8),
             "min_child_samples": trial.suggest_int("min_child_samples", 5, 30),
             "subsample": trial.suggest_float("subsample", 0.7, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 1.0),
@@ -185,6 +185,7 @@ def hybrid_objective(trial, X_train, y_train):
             X_tr_raw, X_val_raw = X_train.iloc[train_idx], X_train.iloc[valid_idx]
             y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[valid_idx]
 
+            # SelectKBest
             selector = SelectKBest(score_func=f_classif, k=k_best)
             X_tr = selector.fit_transform(X_tr_raw, y_tr)
             X_val = selector.transform(X_val_raw)
@@ -193,38 +194,23 @@ def hybrid_objective(trial, X_train, y_train):
             selected_features = [feature_names[i] for i in selected_idx]
             all_selected_features.append(selected_features)
 
+            # Модель
             model = lgb.LGBMClassifier(
                 **{k: v for k, v in params.items() if k != "class_weight"},
                 class_weight=params.get("class_weight"),
                 random_state=RANDOM_STATE,
                 n_jobs=N_JOBS,
                 verbose=-1,
+                device="cpu",
+                max_bin=64,
             )
             model.fit(X_tr, y_tr)
 
             y_pred = model.predict(X_val)
             cm = confusion_matrix(y_val, y_pred, labels=[0, 1])
             tn, fp, fn, tp = get_confusion_counts(cm)
-            precision_val = precision_score(y_val, y_pred, zero_division=0)
 
-            # --- штрафы---
-            if fn > FN_STOP:
-                penalty_fn = np.exp(-(fn - FN_STOP) * FN_PENALTY_WEIGHT)
-            else:
-                penalty_fn = 1.0
-
-            if precision_val < MIN_PRECISION:
-                penalty_prec = np.exp(-(MIN_PRECISION - precision_val) * FP_PENALTY_WEIGHT * 10)
-            else:
-                penalty_prec = 1.0
-
-            # --- мягкое ограничение FN ---
-            if fn > MAX_FN_SOFT:
-                penalty_soft_fn = np.exp(-(fn - MAX_FN_SOFT) * FN_WEIGHT)
-            else:
-                penalty_soft_fn = 1.0
-
-            # --- базовая метрика ---
+            # метрика
             if METRIC == "f1":
                 base_score = f1_score(y_val, y_pred, zero_division=0)
             elif METRIC == "accuracy":
@@ -232,7 +218,7 @@ def hybrid_objective(trial, X_train, y_train):
             elif METRIC == "recall":
                 base_score = recall_score(y_val, y_pred)
             elif METRIC == "precision":
-                base_score = precision_val
+                base_score = precision_score(y_val, y_pred, zero_division=0)
             elif METRIC == "roc_auc":
                 y_proba = model.predict_proba(X_val)[:, 1]
                 base_score = roc_auc_score(y_val, y_proba)
@@ -241,13 +227,11 @@ def hybrid_objective(trial, X_train, y_train):
             else:
                 base_score = recall_score(y_val, y_pred)
 
-            # --- итоговый скор с учётом всех штрафов ---
-            score = base_score * penalty_fn * penalty_prec * penalty_soft_fn
-            scores.append(score)
+            scores.append(base_score)
 
         mean_score = np.mean(scores)
 
-        # сохраняем признаки
+        # признаки в user_attrs
         from collections import Counter
 
         flat_features = [f for sublist in all_selected_features for f in sublist]
@@ -295,11 +279,11 @@ def run_optuna_experiment(
         best_params.pop("k_best", None)
         model_params = {**best_params, "random_state": RANDOM_STATE, "n_jobs": N_JOBS}
 
-        # final model
+        # --- финальная модель ---
         final_model = lgb.LGBMClassifier(**model_params)
         final_model.fit(X_train_sel, y_train)
 
-        # --- подбор порога только на лучшей модели ---
+        # --- подбор порога только на финальной модели ---
         y_proba_train = final_model.predict_proba(X_train_sel)[:, 1]
         best_threshold, best_fn, best_fp = 0.5, float("inf"), float("inf")
 
@@ -416,6 +400,7 @@ def run_optuna_experiment(
     except Exception as e:
         logger.exception(f"Ошибка в run_optuna_experiment: {e}")
         raise
+
 
 
 def log_with_mlflow(
