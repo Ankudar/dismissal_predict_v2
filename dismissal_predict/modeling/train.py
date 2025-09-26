@@ -64,7 +64,7 @@ METRIC = "f2"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
 MLFLOW_EXPERIMENT_TOP = "top_users"
 EARLY_STOP = 500
-BETA_FOR_F2 = 10
+BETA_FOR_F2 = 20
 
 
 N_JOBS = -1
@@ -73,8 +73,9 @@ MIN_PRECISION = 0.4  # в текущей версии не использует�
 
 # сетка для перебора
 # перебор FN_WEIGHT и FP_WEIGHT - FN больше значит больше штраф за FN, с FP также
-FN_WEIGHT_GRID = range(0, 20)
+FN_WEIGHT_GRID = range(20, 30)
 FP_WEIGHT_GRID = range(0, 5)
+N_ITERATIONS = len(FN_WEIGHT_GRID) * len(FP_WEIGHT_GRID)
 
 warnings.filterwarnings("ignore")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -209,7 +210,14 @@ def find_best_threshold_weighted(y_true, y_proba, thresholds, fn_weight=2.0, fp_
     return best_thr, best_fn, best_fp
 
 
-def hybrid_objective(trial, X_train, y_train, fn_weight=10, fp_weight=2):
+def hybrid_objective(
+    trial,
+    X_train,
+    y_train,
+    fn_weight=10,
+    fp_weight=2,
+    n_iter=None,
+):
     """Objective-функция для Optuna: SelectKBest один раз + LightGBM + CV + early stopping + pruner."""
     try:
         # --- feature selection ---
@@ -307,7 +315,7 @@ def hybrid_objective(trial, X_train, y_train, fn_weight=10, fp_weight=2):
         # --- кастомный вывод каждые N итераций ---
         if trial.number % 50 == 0:
             logger.info(
-                f"Trial {trial.number}: mean_score={mean_score:.4f} ({METRIC}), "
+                f"[{n_iter}/{N_ITERATIONS}] Trial {trial.number}: mean_score={mean_score:.4f} ({METRIC}), "
                 f"features={len(selected_features)}, params={trial.params}"
             )
 
@@ -332,6 +340,7 @@ def run_optuna_experiment(
     current_time,
     fn_weight=10,
     fp_weight=2,
+    n_iter=None,
 ):
     """Запуск Optuna + обучение финальной модели + логирование."""
     try:
@@ -345,6 +354,7 @@ def run_optuna_experiment(
             y_train=y_train,
             fn_weight=fn_weight,
             fp_weight=fp_weight,
+            n_iter=n_iter,
         )
         study = optuna.create_study(
             study_name=experiment_name,
@@ -470,6 +480,8 @@ def run_optuna_experiment(
             y_pred_proba=y_test_proba,
             y_pred=(y_test_proba >= best_threshold).astype(int),
             is_best=is_best,
+            fn_weight=fn_weight,
+            fp_weight=fp_weight,
         )
 
     except Exception as e:
@@ -802,7 +814,9 @@ if __name__ == "__main__":
     X_top = top_users.drop(columns=[TARGET_COL])
     y_top = top_users[TARGET_COL]
 
+    n_iter = 0
     for fn_weight, fp_weight in product(FN_WEIGHT_GRID, FP_WEIGHT_GRID):
+        n_iter += 1
         logger.info(f"=== Запуск с параметрами: FN_WEIGHT={fn_weight}, FP_WEIGHT={fp_weight} ===")
 
         # train/test split main_users
@@ -822,6 +836,7 @@ if __name__ == "__main__":
             current_time=today(),
             fn_weight=fn_weight,
             fp_weight=fp_weight,
+            n_iter=n_iter,
         )
 
         # train/test split top_users
