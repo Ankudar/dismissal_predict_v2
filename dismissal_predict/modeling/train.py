@@ -35,7 +35,11 @@ from sklearn.metrics import (
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from tqdm import tqdm
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 # для наглядности лучше или хуже новая модель
@@ -55,23 +59,25 @@ TARGET_COL = "уволен"
 TEST_SIZE = 0.25
 RANDOM_STATE = 40
 N_TRIALS = 10000  # итерации для оптуны
-N_SPLITS = 3  # число кроссвалидаций
+N_SPLITS = 5  # число кроссвалидаций
 METRIC = "f2"
 MLFLOW_EXPERIMENT_MAIN = "main_users"
 MLFLOW_EXPERIMENT_TOP = "top_users"
-EARLY_STOP = 200
+EARLY_STOP = 500
 BETA_FOR_F2 = 10
 
 
 N_JOBS = -1
 THRESHOLDS = np.arange(0.1, 0.9, 0.01)
-
-# FN_WEIGHT и FP_WEIGHT: Увеличение веса для FN и уменьшение для FP помогает сбалансировать итоговый результат.
-FN_WEIGHT = 2
-FP_WEIGHT = 10
 MIN_PRECISION = 0.4  # в текущей версии не используется.. удалить или реализовать
 
+# сетка для перебора
+# перебор FN_WEIGHT и FP_WEIGHT - FN больше значит больше штраф за FN, с FP также
+FN_WEIGHT_GRID = range(0, 20)
+FP_WEIGHT_GRID = range(0, 5)
+
 warnings.filterwarnings("ignore")
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 main_users = pd.read_csv(INPUT_FILE_MAIN_USERS, delimiter=",", decimal=",")
 top_users = pd.read_csv(INPUT_FILE_TOP_USERS, delimiter=",", decimal=",")
@@ -203,11 +209,11 @@ def find_best_threshold_weighted(y_true, y_proba, thresholds, fn_weight=2.0, fp_
     return best_thr, best_fn, best_fp
 
 
-def hybrid_objective(trial, X_train, y_train):
+def hybrid_objective(trial, X_train, y_train, fn_weight=10, fp_weight=2):
     """Objective-функция для Optuna: SelectKBest один раз + LightGBM + CV + early stopping + pruner."""
     try:
-        # --- feature selection (1 раз) ---
-        k_best = trial.suggest_int("k_best", 1, min(40, X_train.shape[1]))
+        # --- feature selection ---
+        k_best = trial.suggest_int("k_best", 5, min(40, X_train.shape[1]))
         feature_names = X_train.columns.tolist()
 
         selector = SelectKBest(score_func=f_classif, k=k_best)
@@ -216,10 +222,10 @@ def hybrid_objective(trial, X_train, y_train):
 
         # --- hyperparams ---
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 200, 1000, step=100),
+            "n_estimators": trial.suggest_int("n_estimators", 200, 2000, step=100),
             "learning_rate": trial.suggest_float("learning_rate", 0.05, 0.2, log=True),
             "num_leaves": trial.suggest_int("num_leaves", 31, 128),
-            "max_depth": trial.suggest_int("max_depth", 4, 12),
+            "max_depth": trial.suggest_int("max_depth", 4, 24),
             "min_child_samples": trial.suggest_int("min_child_samples", 5, 30),
             "subsample": trial.suggest_float("subsample", 0.7, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 1.0),
@@ -250,29 +256,42 @@ def hybrid_objective(trial, X_train, y_train):
             )
 
             y_val_proba = model.predict_proba(X_val)[:, 1]
-            thr = 0.5
 
+            # --- подбор оптимального трешхолда ---
+            thresholds = THRESHOLDS
+            best_threshold, best_fn, best_fp = find_best_threshold_weighted(
+                y_val, y_val_proba, thresholds=THRESHOLDS, fn_weight=fn_weight, fp_weight=fp_weight
+            )
+
+            # --- расчет метрики на оптимальном трешхолде ---
             if METRIC == "f1":
-                score = f1_score(y_val, (y_val_proba >= thr).astype(int))
+                score = f1_score(y_val, (y_val_proba >= best_threshold).astype(int))
             elif METRIC == "accuracy":
-                score = accuracy_score(y_val, (y_val_proba >= thr).astype(int))
+                score = accuracy_score(y_val, (y_val_proba >= best_threshold).astype(int))
             elif METRIC == "recall":
-                score = recall_score(y_val, (y_val_proba >= thr).astype(int))
+                score = recall_score(y_val, (y_val_proba >= best_threshold).astype(int))
             elif METRIC == "precision":
-                score = precision_score(y_val, (y_val_proba >= thr).astype(int), zero_division=0)
+                score = precision_score(
+                    y_val, (y_val_proba >= best_threshold).astype(int), zero_division=0
+                )
             elif METRIC == "roc_auc":
                 score = roc_auc_score(y_val, y_val_proba)
             elif METRIC == "custom":
                 tn, fp, fn, tp = get_confusion_counts(
-                    confusion_matrix(y_val, (y_val_proba >= thr).astype(int), labels=[0, 1])
+                    confusion_matrix(
+                        y_val, (y_val_proba >= best_threshold).astype(int), labels=[0, 1]
+                    )
                 )
                 score = custom_metric_from_counts(tp, tn, fn, fp)
             elif METRIC == "f2":
                 score = fbeta_score(
-                    y_val, (y_val_proba >= thr).astype(int), beta=BETA_FOR_F2, zero_division=0
+                    y_val,
+                    (y_val_proba >= best_threshold).astype(int),
+                    beta=BETA_FOR_F2,
+                    zero_division=0,
                 )
             else:
-                score = recall_score(y_val, (y_val_proba >= thr).astype(int))
+                score = recall_score(y_val, (y_val_proba >= best_threshold).astype(int))
 
             scores.append(score)
 
@@ -284,6 +303,14 @@ def hybrid_objective(trial, X_train, y_train):
         mean_score = np.mean(scores)
         trial.set_user_attr("selected_features", selected_features)
         trial.set_user_attr("n_selected_features", len(selected_features))
+
+        # --- кастомный вывод каждые N итераций ---
+        if trial.number % 50 == 0:
+            logger.info(
+                f"Trial {trial.number}: mean_score={mean_score:.4f} ({METRIC}), "
+                f"features={len(selected_features)}, params={trial.params}"
+            )
+
         return mean_score if np.isfinite(mean_score) else -1
 
     except optuna.TrialPruned:
@@ -303,6 +330,8 @@ def run_optuna_experiment(
     experiment_name,
     model_output_path,
     current_time,
+    fn_weight=10,
+    fp_weight=2,
 ):
     """Запуск Optuna + обучение финальной модели + логирование."""
     try:
@@ -310,7 +339,13 @@ def run_optuna_experiment(
         logger.info(f"Experiment: {experiment_name}")
         mlflow.set_experiment(experiment_name)
 
-        objective = partial(hybrid_objective, X_train=X_train, y_train=y_train)
+        objective = partial(
+            hybrid_objective,
+            X_train=X_train,
+            y_train=y_train,
+            fn_weight=fn_weight,
+            fp_weight=fp_weight,
+        )
         study = optuna.create_study(
             study_name=experiment_name,
             direction="maximize",
@@ -354,7 +389,7 @@ def run_optuna_experiment(
         # подбор threshold на валидации (через find_best_threshold_weighted)
         y_val_proba = final_model.predict_proba(X_val)[:, 1]
         best_threshold, best_fn, best_fp = find_best_threshold_weighted(
-            y_val, y_val_proba, thresholds=THRESHOLDS, fn_weight=FN_WEIGHT, fp_weight=FP_WEIGHT
+            y_val, y_val_proba, thresholds=THRESHOLDS, fn_weight=fn_weight, fp_weight=fp_weight
         )
         logger.info(f"Best threshold: {best_threshold}, FN={best_fn}, FP={best_fp}")
 
@@ -460,6 +495,8 @@ def log_with_mlflow(
     y_pred_proba,
     y_pred,
     is_best: bool = False,
+    fn_weight: int = 10,
+    fp_weight: int = 2,
 ):
     try:
         n_selected_features = len(selected_features)
@@ -481,6 +518,8 @@ def log_with_mlflow(
             mlflow.log_param("is_best", is_best)
             mlflow.log_param("opt_metric", f"{metric}")
             mlflow.log_param("n_selected_features", n_selected_features)
+            mlflow.log_param("fn_weight", fn_weight)
+            mlflow.log_param("fp_weight", fp_weight)
 
             mlflow.log_metric("fn_test", fn)
             mlflow.log_metric("fp_test", fp)
@@ -709,13 +748,9 @@ def log_with_mlflow(
                 "N_SPLITS": N_SPLITS,
                 "METRIC": METRIC,
                 "TARGET_COL": TARGET_COL,
-                "FN_PENALTY_WEIGHT": FN_PENALTY_WEIGHT,
-                "FP_PENALTY_WEIGHT": FP_PENALTY_WEIGHT,
-                "FN_WEIGHT": FN_WEIGHT,
-                "FP_WEIGHT": FP_WEIGHT,
+                "FN_WEIGHT": fn_weight,
+                "FP_WEIGHT": fp_weight,
                 "MIN_PRECISION": MIN_PRECISION,
-                "FN_STOP": FN_STOP,
-                "MAX_FN_SOFT": MAX_FN_SOFT,
             }
 
             with open("experiment_config.json", "w") as f:
@@ -767,32 +802,10 @@ if __name__ == "__main__":
     X_top = top_users.drop(columns=[TARGET_COL])
     y_top = top_users[TARGET_COL]
 
-    # Сетка параметров
-    fn_penalty_grid = range(0, 10)  # первое входит, второе нет
-    fp_penalty_grid = range(0, 10)
-    fn_stop_grid = range(0, 10)
-    max_fn_soft_grid = range(0, 10)
+    for fn_weight, fp_weight in product(FN_WEIGHT_GRID, FP_WEIGHT_GRID):
+        logger.info(f"=== Запуск с параметрами: FN_WEIGHT={fn_weight}, FP_WEIGHT={fp_weight} ===")
 
-    # FN_PENALTY_WEIGHT: Увеличение этого значения делает штраф за ложные отрицательные более значительным, что помогает минимизировать их количество.
-    # FP_PENALTY_WEIGHT: Уменьшение этого значения снижает штраф за ложные положительные, что позволяет им быть менее критичными.
-    # FN_STOP # Жёсткое ограничение FN для подбора трешхолда
-    # MAX_FN_SOFT # Мягкое ограничение FN уже непосредственно в модели обучения
-
-    for fn_penalty, fp_penalty, fn_stop_val, max_fn_soft_val in product(
-        fn_penalty_grid, fp_penalty_grid, fn_stop_grid, max_fn_soft_grid
-    ):
-        # Устанавливаем глобальные параметры
-        FN_PENALTY_WEIGHT = fn_penalty
-        FP_PENALTY_WEIGHT = fp_penalty
-        FN_STOP = fn_stop_val
-        MAX_FN_SOFT = max_fn_soft_val
-
-        logger.info(
-            f"=== Запуск с параметрами: FN_PENALTY_WEIGHT={FN_PENALTY_WEIGHT}, "
-            f"FP_PENALTY_WEIGHT={FP_PENALTY_WEIGHT}, FN_STOP={FN_STOP}, MAX_FN_SOFT={MAX_FN_SOFT} ==="
-        )
-
-        # train/test split
+        # train/test split main_users
         X_train_main, X_test_main, y_train_main, y_test_main = train_test_split(
             X_main, y_main, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_main
         )
@@ -807,20 +820,25 @@ if __name__ == "__main__":
             experiment_name=f"{MLFLOW_EXPERIMENT_MAIN}",
             model_output_path=f"{MODELS}/main_users.pkl",
             current_time=today(),
+            fn_weight=fn_weight,
+            fp_weight=fp_weight,
         )
 
+        # train/test split top_users
         X_train_top, X_test_top, y_train_top, y_test_top = train_test_split(
             X_top, y_top, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_top
         )
 
-        run_optuna_experiment(
-            X_train=X_train_top,
-            y_train=y_train_top,
-            X_test=X_test_top,
-            y_test=y_test_top,
-            metric=METRIC,
-            n_trials=N_TRIALS,
-            experiment_name=f"{MLFLOW_EXPERIMENT_TOP}",
-            model_output_path=f"{MODELS}/top_users.pkl",
-            current_time=today(),
-        )
+        # run_optuna_experiment(
+        #     X_train=X_train_top,
+        #     y_train=y_train_top,
+        #     X_test=X_test_top,
+        #     y_test=y_test_top,
+        #     metric=METRIC,
+        #     n_trials=N_TRIALS,
+        #     experiment_name=f"{MLFLOW_EXPERIMENT_TOP}",
+        #     model_output_path=f"{MODELS}/top_users.pkl",
+        #     current_time=today(),
+        #     fn_weight=fn_weight,
+        #     fp_weight=fp_weight,
+        # )
