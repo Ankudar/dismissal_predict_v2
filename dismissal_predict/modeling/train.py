@@ -14,6 +14,7 @@ from lightgbm import log_evaluation
 import matplotlib.pyplot as plt
 import mlflow
 import mlflow.sklearn
+from mlflow.tracking import MlflowClient
 import numpy as np
 import optuna
 import pandas as pd
@@ -76,6 +77,8 @@ MIN_PRECISION = 0.4  # в текущей версии не использует�
 FN_WEIGHT_GRID = range(20, 30)
 FP_WEIGHT_GRID = range(0, 5)
 N_ITERATIONS = len(FN_WEIGHT_GRID) * len(FP_WEIGHT_GRID)
+
+N_MLFLOW_COUNT = 20  # сколько храним моделей по убыванию ключевой метрики
 
 warnings.filterwarnings("ignore")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -790,6 +793,24 @@ def log_with_mlflow(
         raise
 
 
+def keep_top_n_models(experiment_name: str, metric: str, n_keep: int = 10):
+    client = MlflowClient()
+    experiment = client.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        return
+
+    # Получаем все запуски
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        order_by=[f"metrics.{metric} DESC"],  # сортировка по убыванию метрики
+    )
+
+    # Если моделей больше n_keep → удаляем лишние
+    if len(runs) > n_keep:
+        for run in runs[n_keep:]:
+            client.delete_run(run.info.run_id)
+
+
 def today():
     return datetime.now()
 
@@ -857,3 +878,8 @@ if __name__ == "__main__":
         #     fn_weight=fn_weight,
         #     fp_weight=fp_weight,
         # )
+
+    keep_top_n_models(
+        experiment_name=f"{MLFLOW_EXPERIMENT_MAIN}", metric=METRIC, n_keep=N_MLFLOW_COUNT
+    )
+    # keep_top_n_models(experiment_name=f"{MLFLOW_EXPERIMENT_TOP}", metric=METRIC, n_keep=N_MLFLOW_COUNT)
